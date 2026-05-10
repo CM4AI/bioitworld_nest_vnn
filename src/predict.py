@@ -1,4 +1,3 @@
-
 import argparse
 import sys
 import os
@@ -12,7 +11,7 @@ import torch.nn.functional as F
 import util
 
 
-def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, result_file, cell_features):
+def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, result_file, cell_features, task):
 
 	feature_dim = gene_dim
 
@@ -75,8 +74,18 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 			with open(hidden_file, 'ab') as f:
 				np.savetxt(f, hidden_grad.data.cpu().numpy(), '%.4e', delimiter='\t')
 
-	test_corr = util.pearson_corr(test_predict, predict_label_gpu)
-	print("Test correlation\t%s\t%.4f" % (model.root, test_corr))
+	if task == 'binary':
+		test_probs = torch.sigmoid(test_predict)
+		test_preds_binary = (test_probs >= 0.5).float()
+		correct = (test_preds_binary.view(-1) == predict_label_gpu.view(-1)).float()
+		acc = correct.sum() / len(correct)
+		print("Test accuracy\t%s\t%.4f" % (model.root, acc))
+		# Save probabilities and binary predictions
+		np.savetxt(result_file + '_probabilities.txt', test_probs.cpu().numpy(), '%.4e')
+		np.savetxt(result_file + '_predictions.txt', test_preds_binary.cpu().numpy(), '%d')
+	else:
+		test_corr = util.pearson_corr(test_predict, predict_label_gpu)
+		print("Test correlation\t%s\t%.4f" % (model.root, test_corr))
 
 	np.savetxt(result_file + '.txt', test_predict.cpu().numpy(),'%.4e')
 
@@ -93,24 +102,32 @@ parser.add_argument('-cuda', help='Specify GPU', type=int, default=0)
 parser.add_argument('-mutations', help = 'Mutation information for cell lines', type = str)
 parser.add_argument('-cn_deletions', help = 'Copy number deletions for cell lines', type = str)
 parser.add_argument('-cn_amplifications', help = 'Copy number amplifications for cell lines', type = str)
+parser.add_argument('-fusions', help = 'Fusion information for cell lines', type = str, default = None)
+parser.add_argument('-task', help = 'Task type: continuous or binary', type = str, default = 'continuous', choices = ['continuous', 'binary'])
+parser.add_argument('-label', help = 'Label column to use from test data', type = str, default = None)
 parser.add_argument('-zscore_method', help='zscore method (zscore/robustz)', type=str)
 parser.add_argument('-std', help = 'Standardization File', type = str)
 
 opt = parser.parse_args()
 torch.set_printoptions(precision=5)
 
-predict_data, cell2id_mapping = util.prepare_predict_data(opt.predict, opt.cell2id, opt.zscore_method, opt.std)
+predict_data, cell2id_mapping = util.prepare_predict_data(opt.predict, opt.cell2id, opt.zscore_method, opt.std, opt.label, opt.task)
 gene2id_mapping = util.load_mapping(opt.gene2id, "genes")
 
 # load cell/drug features
 mutations = np.genfromtxt(opt.mutations, delimiter = ',')
 cn_deletions = np.genfromtxt(opt.cn_deletions, delimiter = ',')
 cn_amplifications = np.genfromtxt(opt.cn_amplifications, delimiter = ',')
-cell_features = np.dstack([mutations, cn_deletions, cn_amplifications])
+
+feature_layers = [mutations, cn_deletions, cn_amplifications]
+if opt.fusions is not None:
+	fusions = np.genfromtxt(opt.fusions, delimiter = ',')
+	feature_layers.append(fusions)
+cell_features = np.dstack(feature_layers)
 
 num_cells = len(cell2id_mapping)
 num_genes = len(gene2id_mapping)
 
 CUDA_ID = opt.cuda
 
-predict(predict_data, num_genes, opt.load, opt.hidden, opt.batchsize, opt.result, cell_features)
+predict(predict_data, num_genes, opt.load, opt.hidden, opt.batchsize, opt.result, cell_features, opt.task)

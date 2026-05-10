@@ -13,9 +13,10 @@ class CCCLoss(torch.nn.Module):
 		y_hat_var = torch.var(y_hat)
 		y_true_std = torch.std(y_true)
 		y_hat_std = torch.std(y_hat)
-		vx = y_true - torch.mean(y_true)
-		vy = y_hat - torch.mean(y_hat)
+		vx = y_true - y_true_mean
+		vy = y_hat - y_hat_mean
 		pcc = torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx ** 2) + self.eps) * torch.sqrt(torch.sum(vy ** 2) + self.eps))
-		ccc = (2 * pcc * y_true_std * y_hat_std) / (y_true_var + y_hat_var + (y_hat_mean - y_true_mean) ** 2)
+		denom = y_true_var + y_hat_var + (y_hat_mean - y_true_mean) ** 2 + self.eps
+		ccc = (2 * pcc * y_true_std * y_hat_std) / denom
 		ccc = 1 - ccc
 		return ccc

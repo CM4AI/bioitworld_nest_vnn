@@ -1,0 +1,15 @@
+# NeST-VNN environment for NVIDIA DGX Spark (GB10 Blackwell, ARM64, CUDA 13.0)
+#
+# Setup:
+#   conda env create -f dgx_spark_env.yml
+#   conda activate nest_vnn
+
+name: nest_vnn
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+    - -r spark_requirements.txt

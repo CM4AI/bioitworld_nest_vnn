@@ -1,3 +1,5 @@
+!data/gene2ind.txt
+!data/ontology.txt
 data/
 result/
 hidden*/
@@ -17,3 +19,5 @@ archive*/
 logs/
 es_scripts/
 plots/
+sample/
+MODEL/

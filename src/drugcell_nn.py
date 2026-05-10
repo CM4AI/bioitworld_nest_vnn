@@ -62,7 +62,7 @@ class DrugCellNN(nn.Module):
 		for gene,_ in self.gene_id_mapping.items():
 			#self.add_module(gene + '_dropout_layer', nn.Dropout(p = self.dropout_fraction))
 			self.add_module(gene + '_feature_layer', nn.Linear(self.feature_dim, 1))
-			self.add_module(gene + '_batchnorm_layer', nn.BatchNorm1d(1))
+			self.add_module(gene + '_batchnorm_layer', nn.BatchNorm1d(1, eps=1e-3))
 
 		for term, gene_set in self.term_direct_gene_map.items():
 			if len(gene_set) == 0:
@@ -112,7 +112,7 @@ class DrugCellNN(nn.Module):
 				if i >= self.min_dropout_layer:
 					self.add_module(term + '_dropout_layer', nn.Dropout(p = self.dropout_fraction))
 				self.add_module(term + '_linear_layer', nn.Linear(input_size, term_hidden))
-				self.add_module(term + '_batchnorm_layer', nn.BatchNorm1d(term_hidden))
+				self.add_module(term + '_batchnorm_layer', nn.BatchNorm1d(term_hidden, eps=1e-3))
 				self.add_module(term + '_aux_linear_layer1', nn.Linear(term_hidden, 1))
 				self.add_module(term + '_aux_linear_layer2', nn.Linear(1, 1))
 

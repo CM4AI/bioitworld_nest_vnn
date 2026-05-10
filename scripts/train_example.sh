@@ -1,0 +1,11 @@
+python src/train.py \
+  -onto sample/nest_vnn_breast_input/ontology.txt \
+  -gene2id sample/nest_vnn_breast_input/gene2ind.txt \
+  -cell2id sample/nest_vnn_breast_input/cell2ind.txt \
+  -train sample/nest_vnn_breast_input/training_data.txt \
+  -mutations sample/nest_vnn_breast_input/cell2mutation.txt \
+  -cn_deletions sample/nest_vnn_breast_input/cell2cndeletion.txt \
+  -cn_amplifications sample/nest_vnn_breast_input/cell2cnamplification.txt \
+  -fusions sample/nest_vnn_breast_input/cell2fusion.txt \
+  -label binary_os_status -task binary \
+  -cuda 0 -epoch 300 -batchsize 512 -optimize 1

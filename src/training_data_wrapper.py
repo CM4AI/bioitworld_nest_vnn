@@ -3,6 +3,7 @@ import numpy as np
 import networkx as nx
 import networkx.algorithms.components.connected as nxacc
 import networkx.algorithms.dag as nxadag
+import os
 
 import util
 
@@ -28,18 +29,28 @@ class TrainingDataWrapper():
 		self.delta = args.delta
 		self.min_dropout_layer = args.min_dropout_layer
 		self.dropout_fraction = args.dropout_fraction
+		self.task = args.task
+		self.label_col = args.label
 		self.load_ontology(args.onto)
 
 		self.mutations = np.genfromtxt(args.mutations, delimiter = ',')
 		self.cn_deletions = np.genfromtxt(args.cn_deletions, delimiter = ',')
 		self.cn_amplifications = np.genfromtxt(args.cn_amplifications, delimiter = ',')
-		self.cell_features = np.dstack([self.mutations, self.cn_deletions, self.cn_amplifications])
 
+		feature_layers = [self.mutations, self.cn_deletions, self.cn_amplifications]
+		if args.fusions is not None:
+			self.fusions = np.genfromtxt(args.fusions, delimiter = ',')
+			feature_layers.append(self.fusions)
+			print('Loaded fusions: %d cells x %d genes' % (self.fusions.shape[0], self.fusions.shape[1]))
+		self.cell_features = np.dstack(feature_layers)
+		print('Cell feature tensor shape: %s (cells x genes x features)' % str(self.cell_features.shape))
+
+		os.makedirs(self.modeldir, exist_ok=True)
 		self.train_feature, self.train_label, self.val_feature, self.val_label = self.prepare_train_data()
 
 
 	def prepare_train_data(self):
-		return util.prepare_train_data(self.train, self.cell_id_mapping, self.zscore_method, self.std)
+		return util.prepare_train_data(self.train, self.cell_id_mapping, self.zscore_method, self.std, self.label_col, self.task)
 
 	def load_ontology(self, file_name):
 
