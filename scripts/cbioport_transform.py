@@ -594,32 +594,41 @@ def write_readme(output_dir, sample_ids, gene2ind, endpoints,
 
 def main():
     parser = argparse.ArgumentParser(description="Transform cBioPortal data → NeST-VNN format")
-    parser.add_argument("input_dir", help="cBioPortal output directory (from cbioportal_download.py)")
-    parser.add_argument("-o", "--output", help="Output directory", default="nest_vnn_input")
-    parser.add_argument("--nest-vnn", help="Path to nest_vnn repo sample dir", default="nest_vnn/sample")
+    parser.add_argument("study_id", help="cBioPortal study ID (e.g. laml_tcga_pub, breast_msk_2025)")
+    parser.add_argument("--data-dir", help="Base data directory", default="data")
     parser.add_argument("--endpoints-json", help="JSON file with endpoint config (skip interactive)", default=None)
     args = parser.parse_args()
 
-    input_dir = Path(args.input_dir)
-    output_dir = Path(args.output)
-    output_dir.mkdir(exist_ok=True)
-    nest_vnn_sample = Path(args.nest_vnn)
+    study_id = args.study_id
+    data_dir = Path(args.data_dir)
+    study_dir = data_dir / "output" / study_id
+
+    input_dir = study_dir / "cbioportal_output"
+    output_dir = study_dir / "nest_vnn_input"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Shared gene panel and ontology at data/ level
+    gene2ind_path = data_dir / "gene2ind.txt"
+    ontology_path = data_dir / "ontology.txt"
 
     print("=" * 60)
     print("cBioPortal → NeST-VNN Format Converter")
-    print("=" * 60 + "\n")
+    print("=" * 60)
+    print(f"Study:    {study_id}")
+    print(f"Input:    {input_dir}")
+    print(f"Output:   {output_dir}")
+    print(f"Gene map: {gene2ind_path}\n")
 
     # Validate
-    gene2ind_path = nest_vnn_sample / "gene2ind.txt"
-    ontology_path = nest_vnn_sample / "ontology.txt"
     for p in [gene2ind_path, ontology_path]:
         if not p.exists():
-            print(f"ERROR: {p} not found. Clone: git clone https://github.com/idekerlab/nest_vnn")
+            print(f"ERROR: {p} not found.")
+            print(f"Copy gene2ind.txt and ontology.txt from nest_vnn/sample/ to {data_dir}/")
             sys.exit(1)
 
     mutations_path = input_dir / "mutations.csv"
     if not mutations_path.exists():
-        print(f"ERROR: {mutations_path} not found. Run cbioportal_download.py first.")
+        print(f"ERROR: {mutations_path} not found. Run cbioportal_download.py {study_id} first.")
         sys.exit(1)
 
     # Load
@@ -677,7 +686,7 @@ def main():
     print(f"  ✓ cell2ind.txt          ({len(cell2ind_df)} samples)")
 
     shutil.copy(gene2ind_path, output_dir / "gene2ind.txt")
-    print(f"  ✓ gene2ind.txt          ({len(gene2ind)} genes)")
+    print(f"  ✓ gene2ind.txt          (from {gene2ind_path})")
 
     save_matrix(mut_matrix, output_dir / "cell2mutation.txt")
     print(f"  ✓ cell2mutation.txt     ({mut_matrix.shape})")
@@ -692,7 +701,7 @@ def main():
     print(f"  ✓ cell2fusion.txt       ({fus_matrix.shape})")
 
     shutil.copy(ontology_path, output_dir / "ontology.txt")
-    print(f"  ✓ ontology.txt")
+    print(f"  ✓ ontology.txt          (from {ontology_path})")
 
     if not training_df.empty:
         training_df.to_csv(output_dir / "training_data.txt", sep="\t", index=False)

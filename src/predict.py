@@ -15,7 +15,7 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 
 	feature_dim = gene_dim
 
-	model = torch.load(model_file, map_location='cuda:%d' % CUDA_ID)
+	model = torch.load(model_file, map_location='cuda:%d' % CUDA_ID, weights_only=False)
 
 	predict_feature, predict_label = predict_data
 

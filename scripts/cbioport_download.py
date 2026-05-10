@@ -246,16 +246,19 @@ def write_readme(output_dir, study_id, study_info, profiles, sample_ids,
 def main():
     parser = argparse.ArgumentParser(description="Download data from cBioPortal")
     parser.add_argument("study_id", help="cBioPortal study ID (e.g. laml_tcga_pub, breast_msk_2025)")
-    parser.add_argument("-o", "--output", help="Output directory", default=None)
+    parser.add_argument("--data-dir", help="Base data directory", default="data")
     args = parser.parse_args()
 
     study_id = args.study_id
-    output_dir = Path(args.output) if args.output else Path(f"cbioportal_{study_id}")
-    output_dir.mkdir(exist_ok=True)
+    data_dir = Path(args.data_dir)
+    output_dir = data_dir / "output" / study_id / "cbioportal_output"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
     print(f"cBioPortal Data Fetcher")
-    print("=" * 60 + "\n")
+    print("=" * 60)
+    print(f"Study:  {study_id}")
+    print(f"Output: {output_dir}\n")
 
     study_info = get_study_info(study_id)
     profiles = get_molecular_profiles(study_id)

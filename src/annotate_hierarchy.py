@@ -315,11 +315,11 @@ def build_annotated_hierarchy(ontology_path, rlipp_df, gene_df, outdir):
         print(f"GraphML:      {graphml_path} ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)")
 
     # Export CX2
-    build_cx2_hierarchy(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, outdir)
+    build_cx2_hierarchy(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, gene_df, outdir)
 
     # Build interactive HTML visualization
     html_path = outdir / 'hierarchy_viz.html'
-    build_html_viz(ontology, terms, genes, rlipp_scores, gene_scores, html_path)
+    build_html_viz(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, gene_df, html_path)
     print(f"HTML viz:     {html_path}")
 
     # Summary table
@@ -335,11 +335,51 @@ def build_annotated_hierarchy(ontology_path, rlipp_df, gene_df, outdir):
     return G
 
 
-def build_cx2_hierarchy(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, outdir):
+def build_cx2_hierarchy(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, gene_df, outdir):
     """Build a CX2 hierarchy file compatible with Cytoscape Web and NDEx."""
     if not HAS_NDEX2:
         print("CX2:          ⚠ ndex2 not installed — skipping (pip install ndex2)")
         return
+
+    import math
+
+    def safe_float(val, default=0.0):
+        """Convert to float, replacing NaN/inf with default."""
+        try:
+            f = float(val)
+            if math.isnan(f) or math.isinf(f):
+                return default
+            return f
+        except (ValueError, TypeError):
+            return default
+
+    # Build gene p_val lookup
+    gene_pvals = {}
+    if not gene_df.empty and 'p_val' in gene_df.columns:
+        gene_pvals = dict(zip(gene_df['gene'], gene_df['p_val']))
+
+    # Build parent→children map from ontology for recursive gene collection
+    ont_children = {}
+    ont_gene_children = {}
+    for _, row in ontology.iterrows():
+        parent = row['parent']
+        child = row['child']
+        relation = row['relation']
+        if relation == 'gene':
+            ont_gene_children.setdefault(parent, []).append(child)
+        else:
+            ont_children.setdefault(parent, []).append(child)
+
+    def get_all_descendant_genes(term, visited=None):
+        if visited is None:
+            visited = set()
+        if term in visited:
+            return []
+        visited.add(term)
+        result = list(ont_gene_children.get(term, []))
+        for child_term in ont_children.get(term, []):
+            result.extend(get_all_descendant_genes(child_term, visited))
+        return result
 
     net = CX2Network()
     net.set_network_attributes({
@@ -355,25 +395,35 @@ def build_cx2_hierarchy(ontology, terms, genes, rlipp_scores, rlipp_df, gene_sco
         node_id = net.add_node(attributes={'name': term, 'type': 'term'})
         name_to_id[term] = node_id
 
-        rlipp = rlipp_scores.get(term, 0.0)
-        net.add_node_attribute(node_id, 'RLIPP', float(rlipp), datatype='double')
+        rlipp = safe_float(rlipp_scores.get(term, 0.0))
+        net.add_node_attribute(node_id, 'RLIPP', rlipp, datatype='double')
 
         if not rlipp_df.empty and term in rlipp_scores:
             row = rlipp_df[rlipp_df['term'] == term]
             if not row.empty:
                 row = row.iloc[0]
-                net.add_node_attribute(node_id, 'P_rho', float(row['p_rho']), datatype='double')
-                net.add_node_attribute(node_id, 'P_pval', float(row['p_pval']), datatype='double')
-                net.add_node_attribute(node_id, 'C_rho', float(row['c_rho']), datatype='double')
-                net.add_node_attribute(node_id, 'C_pval', float(row['c_pval']), datatype='double')
+                net.add_node_attribute(node_id, 'P_rho', safe_float(row['p_rho']), datatype='double')
+                net.add_node_attribute(node_id, 'P_pval', safe_float(row['p_pval'], 1.0), datatype='double')
+                net.add_node_attribute(node_id, 'C_rho', safe_float(row['c_rho']), datatype='double')
+                net.add_node_attribute(node_id, 'C_pval', safe_float(row['c_pval'], 1.0), datatype='double')
+
+        # All descendant genes (recursive)
+        all_desc_genes = sorted(set(get_all_descendant_genes(term)))
+        net.add_node_attribute(node_id, 'gene_count', len(all_desc_genes), datatype='integer')
+        if all_desc_genes:
+            net.add_node_attribute(node_id, 'descendant_genes',
+                                   all_desc_genes, datatype='list_of_string')
 
     # Add gene nodes
     for gene in sorted(genes):
         node_id = net.add_node(attributes={'name': gene, 'type': 'gene'})
         name_to_id[gene] = node_id
 
-        rho = gene_scores.get(gene, 0.0)
-        net.add_node_attribute(node_id, 'rho', float(rho), datatype='double')
+        rho = safe_float(gene_scores.get(gene, 0.0))
+        net.add_node_attribute(node_id, 'rho', rho, datatype='double')
+
+        p_val = safe_float(gene_pvals.get(gene, 1.0), 1.0)
+        net.add_node_attribute(node_id, 'p_val', p_val, datatype='double')
 
     # Add edges
     for _, row in ontology.iterrows():
@@ -391,17 +441,44 @@ def build_cx2_hierarchy(ontology, terms, genes, rlipp_scores, rlipp_df, gene_sco
     print(f"CX2:          {cx2_path} ({n_nodes} nodes, {n_edges} edges)")
 
 
-def build_html_viz(ontology, terms, genes, rlipp_scores, gene_scores, outpath):
+def build_html_viz(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, gene_df, outpath):
     """Build a standalone interactive HTML visualization of the annotated hierarchy."""
+    import math
+
+    def sf(val, default=0.0):
+        try:
+            f = float(val)
+            return default if math.isnan(f) or math.isinf(f) else round(f, 4)
+        except (ValueError, TypeError):
+            return default
+
+    # Build RLIPP lookup by term
+    rlipp_rows = {}
+    if not rlipp_df.empty:
+        for _, row in rlipp_df.iterrows():
+            rlipp_rows[row['term']] = row
+
+    # Build gene p_val lookup
+    gene_pvals = {}
+    if not gene_df.empty and 'p_val' in gene_df.columns:
+        gene_pvals = dict(zip(gene_df['gene'], gene_df['p_val']))
 
     # Prepare data for JavaScript
     nodes = []
     for term in sorted(terms):
-        rlipp = rlipp_scores.get(term, 0.0)
-        nodes.append({
-            'id': term, 'type': 'term', 'rlipp': round(float(rlipp), 4),
-            'label': term
-        })
+        node = {
+            'id': term, 'type': 'term', 'label': term,
+            'rlipp': sf(rlipp_scores.get(term, 0.0)),
+            'p_rho': 0.0, 'p_pval': 1.0,
+            'c_rho': 0.0, 'c_pval': 1.0,
+        }
+        if term in rlipp_rows:
+            r = rlipp_rows[term]
+            node['p_rho'] = sf(r.get('p_rho', 0.0))
+            node['p_pval'] = sf(r.get('p_pval', 1.0), 1.0)
+            node['c_rho'] = sf(r.get('c_rho', 0.0))
+            node['c_pval'] = sf(r.get('c_pval', 1.0), 1.0)
+        nodes.append(node)
 
     # Only include genes with significant correlations (top 50 by |rho|)
     gene_items = sorted(
@@ -411,7 +488,9 @@ def build_html_viz(ontology, terms, genes, rlipp_scores, gene_scores, outpath):
     top_genes = set()
     for g, rho in gene_items[:50]:
         nodes.append({
-            'id': g, 'type': 'gene', 'rho': round(float(rho), 4),
+            'id': g, 'type': 'gene',
+            'rho': sf(rho),
+            'p_val': sf(gene_pvals.get(g, 1.0), 1.0),
             'label': g
         })
         top_genes.add(g)
@@ -451,7 +530,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 #controls input, #controls select {{ background: #222; border: 1px solid #444; color: #e0e0e0;
                                       padding: 4px 8px; border-radius: 4px; }}
 #main {{ display: flex; height: calc(100vh - 100px); }}
-#table-panel {{ width: 420px; overflow-y: auto; border-right: 1px solid #222;
+#table-panel {{ width: 580px; overflow-y: auto; border-right: 1px solid #222;
                 padding: 8px; font-size: 12px; }}
 #table-panel table {{ width: 100%; border-collapse: collapse; }}
 #table-panel th {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #333;
@@ -492,7 +571,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 </div>
 <div id="main">
     <div id="table-panel"><table>
-        <thead><tr><th>System</th><th>RLIPP</th><th>P_rho</th><th>C_rho</th><th></th></tr></thead>
+        <thead><tr><th>System</th><th>RLIPP</th><th>P_rho</th><th>P_pval</th><th>C_rho</th><th>C_pval</th><th></th></tr></thead>
         <tbody id="table-body"></tbody>
     </table></div>
     <div id="detail" id="detail-panel">
@@ -551,7 +630,9 @@ function renderTable() {{
             <td>${{n.id}}</td>
             <td style="color:${{c}}">${{n.rlipp.toFixed(3)}}</td>
             <td>${{(n.p_rho||0).toFixed(3)}}</td>
+            <td>${{(n.p_pval||0).toExponential(1)}}</td>
             <td>${{(n.c_rho||0).toFixed(3)}}</td>
+            <td>${{(n.c_pval||0).toExponential(1)}}</td>
             <td><span class="bar" style="width:${{w}}px;background:${{c}}"></span></td>
         </tr>`;
     }}).join('');
@@ -566,11 +647,29 @@ function showDetail(termId) {{
     const children = childrenOf[termId] || [];
     const parents = parentsOf[termId] || [];
 
+    // Recursively collect all descendant genes
+    function getAllDescendantGenes(tid, visited) {{
+        if (visited.has(tid)) return [];
+        visited.add(tid);
+        const kids = childrenOf[tid] || [];
+        let genes = [];
+        kids.forEach(c => {{
+            if (c.relation === 'gene') {{
+                genes.push(c.id);
+            }} else {{
+                genes = genes.concat(getAllDescendantGenes(c.id, visited));
+            }}
+        }});
+        return genes;
+    }}
+
     let html = `<h2>${{termId}}</h2>`;
     html += `<div class="meta">`;
     html += `RLIPP: <strong style="color:${{rlippColor(node.rlipp)}}">${{node.rlipp.toFixed(4)}}</strong>`;
     if (node.p_rho !== undefined) html += ` &nbsp;|&nbsp; P_rho: ${{node.p_rho.toFixed(4)}}`;
+    if (node.p_pval !== undefined) html += ` (p=${{node.p_pval.toExponential(2)}})`;
     if (node.c_rho !== undefined) html += ` &nbsp;|&nbsp; C_rho: ${{node.c_rho.toFixed(4)}}`;
+    if (node.c_pval !== undefined) html += ` (p=${{node.c_pval.toExponential(2)}})`;
     html += `</div>`;
 
     if (parents.length > 0) {{
@@ -584,7 +683,7 @@ function showDetail(termId) {{
     }}
 
     const termChildren = children.filter(c => c.relation !== 'gene');
-    const geneChildren = children.filter(c => c.relation === 'gene');
+    const directGenes = children.filter(c => c.relation === 'gene');
 
     if (termChildren.length > 0) {{
         html += `<div class="children"><strong>Child systems (${{termChildren.length}}):</strong><br>`;
@@ -596,12 +695,50 @@ function showDetail(termId) {{
         html += `</div>`;
     }}
 
-    if (geneChildren.length > 0) {{
-        html += `<div class="children" style="margin-top:12px"><strong>Genes (${{geneChildren.length}}):</strong><br>`;
-        geneChildren.forEach(c => {{
+    // Direct genes
+    if (directGenes.length > 0) {{
+        html += `<div class="children" style="margin-top:12px"><strong>Direct genes (${{directGenes.length}}):</strong><br>`;
+        directGenes.forEach(c => {{
             const gn = nodeMap[c.id];
-            const rho = gn ? ` (ρ=${{gn.rho.toFixed(3)}})` : '';
-            html += `<span class="child gene">${{c.id}}${{rho}}</span>`;
+            let info = '';
+            if (gn) {{
+                info = ` (ρ=${{gn.rho.toFixed(3)}}`;
+                if (gn.p_val !== undefined) info += `, p=${{gn.p_val.toExponential(1)}}`;
+                info += `)`;
+            }}
+            html += `<span class="child gene">${{c.id}}${{info}}</span>`;
+        }});
+        html += `</div>`;
+    }}
+
+    // All descendant genes (from child subsystems)
+    const allGenes = [...new Set(getAllDescendantGenes(termId, new Set()))];
+    const directGeneIds = new Set(directGenes.map(c => c.id));
+    const inheritedGenes = allGenes.filter(g => !directGeneIds.has(g));
+
+    if (inheritedGenes.length > 0) {{
+        // Sort by |rho| descending
+        inheritedGenes.sort((a, b) => {{
+            const ra = nodeMap[a] ? Math.abs(nodeMap[a].rho || 0) : 0;
+            const rb = nodeMap[b] ? Math.abs(nodeMap[b].rho || 0) : 0;
+            return rb - ra;
+        }});
+        const showCount = Math.min(inheritedGenes.length, 100);
+        const label = inheritedGenes.length > showCount
+            ? `All descendant genes (${{inheritedGenes.length}}, showing top ${{showCount}} by |ρ|)`
+            : `All descendant genes (${{inheritedGenes.length}})`;
+        html += `<div class="children" style="margin-top:12px"><strong>${{label}}:</strong><br>`;
+        inheritedGenes.slice(0, showCount).forEach(g => {{
+            const gn = nodeMap[g];
+            let info = '';
+            if (gn) {{
+                info = ` (ρ=${{gn.rho.toFixed(3)}}`;
+                if (gn.p_val !== undefined) info += `, p=${{gn.p_val.toExponential(1)}}`;
+                info += `)`;
+            }} else {{
+                info = '';
+            }}
+            html += `<span class="child gene">${{g}}${{info}}</span>`;
         }});
         html += `</div>`;
     }}
@@ -626,13 +763,11 @@ def main():
     parser = argparse.ArgumentParser(
         description='NeST-VNN Explainability: RLIPP + Annotated Hierarchy'
     )
-    parser.add_argument('-hidden', required=True, help='Hidden embeddings directory (from predict.py)')
-    parser.add_argument('-ontology', required=True, help='Ontology file (ontology.txt)')
-    parser.add_argument('-test', required=True, help='Test data file (training_data.txt)')
-    parser.add_argument('-predicted', required=True, help='Predicted values file (from predict.py)')
-    parser.add_argument('-gene2id', required=True, help='Gene-to-index file (gene2ind.txt)')
-    parser.add_argument('-cell2id', required=True, help='Cell-to-index file (cell2ind.txt)')
-    parser.add_argument('-outdir', default='explainability/', help='Output directory')
+    parser.add_argument('study_id', help='cBioPortal study ID (e.g. laml_tcga_pub)')
+    parser.add_argument('--data-dir', default='data', help='Base data directory')
+    parser.add_argument('-hidden', default=None, help='Hidden embeddings directory (override)')
+    parser.add_argument('-predicted', default=None, help='Predicted values file (override)')
+    parser.add_argument('-test', default=None, help='Test data file (override)')
     parser.add_argument('-label', default=None, help='Label column (for new-format test files)')
     parser.add_argument('-task', default='continuous', choices=['continuous', 'binary'])
     parser.add_argument('-cpu_count', type=int, default=1, help='CPU cores for parallel computation')
@@ -640,9 +775,34 @@ def main():
 
     args = parser.parse_args()
 
+    data_dir = Path(args.data_dir)
+    study_dir = data_dir / "output" / args.study_id
+    input_dir = study_dir / "nest_vnn_input"
+    model_dir = study_dir / "model"
+    metrics_dir = study_dir / "metrics"
+    annotation_dir = study_dir / "annotation"
+    annotation_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resolve paths from convention, allow overrides
+    args.ontology = str(input_dir / "ontology.txt")
+    args.gene2id = str(input_dir / "gene2ind.txt")
+    args.cell2id = str(input_dir / "cell2ind.txt")
+    args.outdir = str(annotation_dir)
+
+    if args.hidden is None:
+        args.hidden = str(metrics_dir / "hidden")
+    if args.predicted is None:
+        args.predicted = str(metrics_dir / "predict.txt")
+    if args.test is None:
+        args.test = str(input_dir / "training_data.txt")
+
     print("=" * 60)
     print("NeST-VNN Explainability Pipeline")
-    print("=" * 60 + "\n")
+    print("=" * 60)
+    print(f"Study:      {args.study_id}")
+    print(f"Input:      {input_dir}")
+    print(f"Model:      {model_dir}")
+    print(f"Annotation: {annotation_dir}\n")
 
     # Compute RLIPP and gene scores
     calculator = ClinicalRLIPPCalculator(args)

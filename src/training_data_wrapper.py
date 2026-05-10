@@ -3,7 +3,6 @@ import numpy as np
 import networkx as nx
 import networkx.algorithms.components.connected as nxacc
 import networkx.algorithms.dag as nxadag
-import os
 
 import util
 
@@ -45,7 +44,6 @@ class TrainingDataWrapper():
 		self.cell_features = np.dstack(feature_layers)
 		print('Cell feature tensor shape: %s (cells x genes x features)' % str(self.cell_features.shape))
 
-		os.makedirs(self.modeldir, exist_ok=True)
 		self.train_feature, self.train_label, self.val_feature, self.val_label = self.prepare_train_data()
 
 

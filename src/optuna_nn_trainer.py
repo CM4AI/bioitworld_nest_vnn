@@ -15,7 +15,6 @@ import util
 from vnn_trainer import *
 from training_data_wrapper import *
 from drugcell_nn import *
-from ccc_loss import *
 
 
 class OptunaNNTrainer(VNNTrainer):
