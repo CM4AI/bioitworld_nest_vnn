@@ -213,6 +213,7 @@ class VNNTrainer():
 		best_val_metric = None
 		best_train_metric = None
 		best_val_loss = None
+		best_train_loss = None
 		best_epoch = None
 
 		term_mask_map = util.create_term_mask(self.model.term_direct_gene_map, self.model.gene_dim, self.data_wrapper.cuda)
@@ -333,6 +334,7 @@ class VNNTrainer():
 				best_val_metric = val_metric
 				best_train_metric = train_metric
 				best_val_loss = val_loss.item() if torch.is_tensor(val_loss) else float(val_loss)
+				best_train_loss = total_loss.item() if torch.is_tensor(total_loss) else float(total_loss)
 				best_epoch = epoch
 				torch.save(self.model, self.data_wrapper.modeldir + '/model_final.pt')
 				print("Model saved at epoch {}".format(epoch))
@@ -341,6 +343,7 @@ class VNNTrainer():
 				best_val_metric = val_metric
 				best_train_metric = train_metric
 				best_val_loss = val_loss.item() if torch.is_tensor(val_loss) else float(val_loss)
+				best_train_loss = total_loss.item() if torch.is_tensor(total_loss) else float(total_loss)
 				best_epoch = epoch
 				torch.save(self.model, self.data_wrapper.modeldir + '/model_final.pt')
 				print("Model saved at epoch {}".format(epoch))
@@ -358,6 +361,7 @@ class VNNTrainer():
 					metrics[f"best_val_{metric_name}"] = best_val_metric
 					metrics[f"best_train_{metric_name}"] = best_train_metric
 					metrics["best_val_loss"] = best_val_loss
+					metrics["best_train_loss"] = best_train_loss
 					metrics["best_epoch"] = best_epoch
 				mlflow.log_metrics(metrics, step=epoch)
 

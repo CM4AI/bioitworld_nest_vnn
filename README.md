@@ -153,6 +153,56 @@ Use the sort and filter controls to focus on high-RLIPP systems or search by nam
 
 ---
 
+## Neural network design decisions
+
+### Binary vs. continuous prediction
+
+The network is task-agnostic in structure but differs in how outputs are treated:
+
+| Aspect | Binary (`-task binary`) | Continuous (`-task continuous`) |
+|---|---|---|
+| Main loss | `BCEWithLogitsLoss` (logits in, no sigmoid needed) | `MSELoss` |
+| Label normalization | None (raw 0/1) | Z-scored using training-set mean/std (if `-zscore_method zscore` or `robustz`); parameters saved to `std.txt` and applied at predict time |
+| Inference output | Logits → sigmoid probabilities → thresholded at 0.5 | Raw z-scored predictions (optionally inverted using `std.txt`) |
+| Training metric | Accuracy | Pearson correlation |
+| Auxiliary head loss | `BCEWithLogitsLoss` | `MSELoss` (see below) |
+
+The `-zscore_method auc` default skips normalization entirely, which is appropriate for AUC-style labels or any label that is already on a consistent scale.
+
+### Auxiliary supervision
+
+Every ontology term has two auxiliary output heads (`aux_linear_layer1` → tanh → `aux_linear_layer2`) that are supervised against the same label as the root output during training. The auxiliary loss is summed across all terms and weighted by `-alpha` (default 0.3):
+
+```
+total_loss = main_loss + alpha * sum(aux_loss over all terms)
+```
+
+This ensures gradients flow throughout the full hierarchy at each step — not just through the path from root to leaf — which is critical for learning useful representations at intermediate biological system levels. Without auxiliary supervision, lower layers would receive sparse gradient signal and fail to learn meaningful representations.
+
+### Auxiliary loss: MSE instead of CCC
+
+The original NeST-VNN used Concordance Correlation Coefficient (CCC) for auxiliary term losses in regression tasks. CCC was replaced with MSE because:
+
+- Early in training, auxiliary heads produce near-constant predictions (the network hasn't learned yet), making CCC numerically unstable (denominator approaches zero).
+- MSE degrades gracefully in this regime and provides stable gradients from the first epoch.
+- CCC's additional complexity (measuring both correlation and scale agreement) is not necessary for the auxiliary heads, whose role is to propagate gradients rather than to produce calibrated predictions themselves.
+
+### Ontology-guided sparsity
+
+Each term has a `direct_gene_layer` that is a dense linear layer over all genes, but its weight gradients are zeroed outside the mask of genes actually annotated to that term:
+
+```python
+param.grad.data = torch.mul(param.grad.data, term_mask_map[term_name])
+```
+
+This enforces the ontology's gene-term assignments as a hard architectural constraint: a gene can only directly influence a term it is annotated to in the hierarchy. Weights outside the mask are also initialized near zero. The result is that the network's learned representations are biologically interpretable by construction — activation at a term reflects the state of its annotated genes, not an arbitrary linear combination of all genes.
+
+### Gene feature encoding
+
+Each gene's multi-omic data (mutation, copy number deletion, copy number amplification, optionally fusion — all binary) is passed through a small per-gene network: `Linear(n_features → 1)` → tanh → `BatchNorm1d`. This compresses each gene's genomic state into a single scalar activation before it enters the ontology hierarchy. BatchNorm here prevents any single genomic feature type from dominating due to scale differences.
+
+---
+
 ## Key training parameters
 
 | Flag | Default | Notes |
