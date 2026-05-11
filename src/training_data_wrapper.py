@@ -30,6 +30,9 @@ class TrainingDataWrapper():
 		self.dropout_fraction = args.dropout_fraction
 		self.task = args.task
 		self.label_col = args.label
+		self.mlflow_enabled = getattr(args, 'mlflow', False)
+		self.onto = args.onto
+		self.gene2id = args.gene2id
 		self.load_ontology(args.onto)
 
 		self.mutations = np.genfromtxt(args.mutations, delimiter = ',')

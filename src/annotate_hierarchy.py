@@ -258,7 +258,7 @@ def build_annotated_hierarchy(ontology_path, rlipp_df, gene_df, outdir):
     """
     ontology = pd.read_csv(
         ontology_path, sep='\t', header=None,
-        names=['parent', 'child', 'relation']
+        names=['parent', 'child', 'relation'], dtype=str
     )
 
     # Build score lookups
@@ -480,29 +480,55 @@ def build_html_viz(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, 
             node['c_pval'] = sf(r.get('c_pval', 1.0), 1.0)
         nodes.append(node)
 
-    # Only include genes with significant correlations (top 50 by |rho|)
-    gene_items = sorted(
-        [(g, gene_scores.get(g, 0.0)) for g in genes],
-        key=lambda x: abs(x[1]), reverse=True
-    )
-    top_genes = set()
-    for g, rho in gene_items[:50]:
-        nodes.append({
-            'id': g, 'type': 'gene',
-            'rho': sf(rho),
-            'p_val': sf(gene_pvals.get(g, 1.0), 1.0),
-            'label': g
-        })
-        top_genes.add(g)
+    # Build ontology maps for pre-computing full gene lists per term (matches CX2 builder)
+    ont_children = {}
+    ont_gene_children = {}
+    for _, row in ontology.iterrows():
+        parent, child, relation = row['parent'], row['child'], row['relation']
+        if relation == 'gene':
+            ont_gene_children.setdefault(parent, []).append(child)
+        else:
+            ont_children.setdefault(parent, []).append(child)
 
+    def get_all_desc_genes(term, visited=None):
+        if visited is None:
+            visited = set()
+        if term in visited:
+            return []
+        visited.add(term)
+        result = list(ont_gene_children.get(term, []))
+        for child_term in ont_children.get(term, []):
+            result.extend(get_all_desc_genes(child_term, visited))
+        return result
+
+    # Embed pre-computed gene lists directly in each term node so the JS doesn't need
+    # to traverse edges (which previously only covered the top-50 gene filter).
+    for node in nodes:
+        term = node['id']
+        direct = sorted(ont_gene_children.get(term, []))
+        node['direct_genes'] = [
+            {'id': g, 'rho': sf(gene_scores.get(g, 0.0)), 'p_val': sf(gene_pvals.get(g, 1.0), 1.0)}
+            for g in direct
+        ]
+        direct_set = set(direct)
+        all_desc = sorted(set(get_all_desc_genes(term)))
+        inherited = sorted(
+            [g for g in all_desc if g not in direct_set],
+            key=lambda g: abs(gene_scores.get(g, 0.0)), reverse=True
+        )
+        node['descendant_genes'] = [
+            {'id': g, 'rho': sf(gene_scores.get(g, 0.0)), 'p_val': sf(gene_pvals.get(g, 1.0), 1.0)}
+            for g in inherited
+        ]
+
+    # Only include term-to-term edges; gene data lives in node attributes above.
     edges = []
     for _, row in ontology.iterrows():
-        if row['relation'] == 'gene' and row['child'] not in top_genes:
-            continue
-        edges.append({
-            'source': row['parent'], 'target': row['child'],
-            'relation': row['relation']
-        })
+        if row['relation'] != 'gene':
+            edges.append({
+                'source': row['parent'], 'target': row['child'],
+                'relation': row['relation']
+            })
 
     nodes_json = json.dumps(nodes)
     edges_json = json.dumps(edges)
@@ -510,6 +536,7 @@ def build_html_viz(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, 
     # Compute RLIPP range for color scaling
     rlipp_vals = [s for s in rlipp_scores.values() if abs(s) > 0]
     max_rlipp = max(rlipp_vals) if rlipp_vals else 1.0
+    total_genes = len(genes)
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -584,7 +611,6 @@ const edges = {edges_json};
 const maxRlipp = {max_rlipp};
 
 const termNodes = nodes.filter(n => n.type === 'term');
-const geneNodes = nodes.filter(n => n.type === 'gene');
 const nodeMap = {{}};
 nodes.forEach(n => nodeMap[n.id] = n);
 
@@ -599,7 +625,7 @@ edges.forEach(e => {{
 }});
 
 document.getElementById('stats').textContent =
-    `${{termNodes.length}} systems · ${{geneNodes.length}} top genes · ${{edges.length}} edges`;
+    `${{termNodes.length}} systems · {total_genes} genes · ${{edges.length}} term edges`;
 
 function rlippColor(val) {{
     if (val > 1.2) return '#f5a623';
@@ -644,24 +670,11 @@ function showDetail(termId) {{
     }});
 
     const node = nodeMap[termId];
-    const children = childrenOf[termId] || [];
+    // All edges are term-to-term; gene lists are pre-computed in node attributes.
+    const termChildren = childrenOf[termId] || [];
     const parents = parentsOf[termId] || [];
-
-    // Recursively collect all descendant genes
-    function getAllDescendantGenes(tid, visited) {{
-        if (visited.has(tid)) return [];
-        visited.add(tid);
-        const kids = childrenOf[tid] || [];
-        let genes = [];
-        kids.forEach(c => {{
-            if (c.relation === 'gene') {{
-                genes.push(c.id);
-            }} else {{
-                genes = genes.concat(getAllDescendantGenes(c.id, visited));
-            }}
-        }});
-        return genes;
-    }}
+    const directGenes = node.direct_genes || [];
+    const inheritedGenes = node.descendant_genes || [];
 
     let html = `<h2>${{termId}}</h2>`;
     html += `<div class="meta">`;
@@ -682,9 +695,6 @@ function showDetail(termId) {{
         html += `</div>`;
     }}
 
-    const termChildren = children.filter(c => c.relation !== 'gene');
-    const directGenes = children.filter(c => c.relation === 'gene');
-
     if (termChildren.length > 0) {{
         html += `<div class="children"><strong>Child systems (${{termChildren.length}}):</strong><br>`;
         termChildren.forEach(c => {{
@@ -695,50 +705,24 @@ function showDetail(termId) {{
         html += `</div>`;
     }}
 
-    // Direct genes
     if (directGenes.length > 0) {{
         html += `<div class="children" style="margin-top:12px"><strong>Direct genes (${{directGenes.length}}):</strong><br>`;
-        directGenes.forEach(c => {{
-            const gn = nodeMap[c.id];
-            let info = '';
-            if (gn) {{
-                info = ` (ρ=${{gn.rho.toFixed(3)}}`;
-                if (gn.p_val !== undefined) info += `, p=${{gn.p_val.toExponential(1)}}`;
-                info += `)`;
-            }}
-            html += `<span class="child gene">${{c.id}}${{info}}</span>`;
+        directGenes.forEach(g => {{
+            const info = ` (ρ=${{g.rho.toFixed(3)}}, p=${{g.p_val.toExponential(1)}})`;
+            html += `<span class="child gene">${{g.id}}${{info}}</span>`;
         }});
         html += `</div>`;
     }}
 
-    // All descendant genes (from child subsystems)
-    const allGenes = [...new Set(getAllDescendantGenes(termId, new Set()))];
-    const directGeneIds = new Set(directGenes.map(c => c.id));
-    const inheritedGenes = allGenes.filter(g => !directGeneIds.has(g));
-
     if (inheritedGenes.length > 0) {{
-        // Sort by |rho| descending
-        inheritedGenes.sort((a, b) => {{
-            const ra = nodeMap[a] ? Math.abs(nodeMap[a].rho || 0) : 0;
-            const rb = nodeMap[b] ? Math.abs(nodeMap[b].rho || 0) : 0;
-            return rb - ra;
-        }});
         const showCount = Math.min(inheritedGenes.length, 100);
         const label = inheritedGenes.length > showCount
             ? `All descendant genes (${{inheritedGenes.length}}, showing top ${{showCount}} by |ρ|)`
             : `All descendant genes (${{inheritedGenes.length}})`;
         html += `<div class="children" style="margin-top:12px"><strong>${{label}}:</strong><br>`;
         inheritedGenes.slice(0, showCount).forEach(g => {{
-            const gn = nodeMap[g];
-            let info = '';
-            if (gn) {{
-                info = ` (ρ=${{gn.rho.toFixed(3)}}`;
-                if (gn.p_val !== undefined) info += `, p=${{gn.p_val.toExponential(1)}}`;
-                info += `)`;
-            }} else {{
-                info = '';
-            }}
-            html += `<span class="child gene">${{g}}${{info}}</span>`;
+            const info = ` (ρ=${{g.rho.toFixed(3)}}, p=${{g.p_val.toExponential(1)}})`;
+            html += `<span class="child gene">${{g.id}}${{info}}</span>`;
         }});
         html += `</div>`;
     }}
@@ -772,15 +756,17 @@ def main():
     parser.add_argument('-task', default='continuous', choices=['continuous', 'binary'])
     parser.add_argument('-cpu_count', type=int, default=1, help='CPU cores for parallel computation')
     parser.add_argument('-genotype_hiddens', type=int, default=4, help='Hidden dim per term')
+    parser.add_argument('-mlflow', action='store_true', help='Log annotation artifacts to predict MLflow run')
 
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
     study_dir = data_dir / "output" / args.study_id
     input_dir = study_dir / "nest_vnn_input"
-    model_dir = study_dir / "model"
-    metrics_dir = study_dir / "metrics"
-    annotation_dir = study_dir / "annotation"
+    label_dir = args.label if args.label else "default"
+    run_dir = study_dir / label_dir
+    metrics_dir = run_dir / "metrics"
+    annotation_dir = run_dir / "annotation"
     annotation_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve paths from convention, allow overrides
@@ -800,8 +786,9 @@ def main():
     print("NeST-VNN Explainability Pipeline")
     print("=" * 60)
     print(f"Study:      {args.study_id}")
+    print(f"Label:      {label_dir}")
     print(f"Input:      {input_dir}")
-    print(f"Model:      {model_dir}")
+    print(f"Run dir:    {run_dir}")
     print(f"Annotation: {annotation_dir}\n")
 
     # Compute RLIPP and gene scores
@@ -831,6 +818,24 @@ The RLIPP score measures relative local improvement in predictive power:
   RLIPP ≈ 1: the system doesn't add much beyond its children
   RLIPP < 1: children are more informative than the parent
 """)
+
+    if args.mlflow:
+        try:
+            import mlflow
+            run_id_path = metrics_dir / "mlflow_run_id.txt"
+            predict_run_id = run_id_path.read_text().strip() if run_id_path.exists() else None
+            run_kwargs = {"run_id": predict_run_id} if predict_run_id else {}
+            with mlflow.start_run(**run_kwargs):
+                for fname in [
+                    "rlipp_scores.txt", "gene_scores.txt",
+                    "hierarchy_annotated.graphml", "hierarchy_viz.html",
+                    "top_systems.txt", "hierarchy_annotated.cx2",
+                ]:
+                    fpath = outdir / fname
+                    if fpath.exists():
+                        mlflow.log_artifact(str(fpath), artifact_path="annotation")
+        except ImportError:
+            print("Warning: mlflow not installed; skipping MLflow artifact logging.")
 
 
 if __name__ == "__main__":

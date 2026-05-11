@@ -24,6 +24,7 @@ from pathlib import Path
 import sys
 import shutil
 import json
+import requests
 from datetime import datetime
 
 
@@ -33,6 +34,8 @@ NEST_VNN_SAMPLE = Path("nest_vnn/sample")
 
 CNV_DEEP_DELETION = -2
 CNV_AMPLIFICATION = 2
+
+DEFAULT_NDEX_UUID = "9a8f5326-aa6e-11ea-aaef-0ac135e8bacf"
 
 
 # ── CLI helpers ──────────────────────────────────────────────────────────────
@@ -251,6 +254,297 @@ def interactive_endpoint_selection(clinical_df: pd.DataFrame) -> list[dict]:
     print(f"{'─'*70}")
 
     return endpoints
+
+
+# ── NDEx ontology builder ────────────────────────────────────────────────────
+
+def download_ndex_cx2(uuid: str) -> list:
+    """Download a CX2 network from NDEx Public by UUID."""
+    url = f"https://www.ndexbio.org/v3/networks/{uuid}"
+    resp = requests.get(url, headers={"Accept": "application/json"}, timeout=120)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def parse_cx2_hierarchy(cx2_data: list) -> tuple[dict, dict, list]:
+    """
+    Parse a CX2 document into (node_names, node_genes, edges).
+
+    node_names : {node_id: str}
+    node_genes : {node_id: [gene_symbol, ...]}  from CD_MemberList or similar attrs
+    edges      : [(source_id, target_id)]        hierarchy edges, parent → child
+    """
+    node_names: dict[int, str] = {}
+    node_genes: dict[int, list] = {}
+    edges: list[tuple] = []
+
+    MEMBER_ATTRS = ["Genes", "CD_MemberList", "member", "genes", "HiDeF_persistence"]
+
+    for aspect in cx2_data:
+        if not isinstance(aspect, dict):
+            continue
+
+        if "nodes" in aspect:
+            for node in aspect["nodes"]:
+                nid = node["id"]
+                attrs = node.get("v", {})
+                node_names[nid] = attrs.get("n", attrs.get("name", str(nid)))
+
+                genes: list[str] = []
+                for attr in MEMBER_ATTRS:
+                    val = attrs.get(attr)
+                    if isinstance(val, str) and val.strip():
+                        genes = [g.strip() for g in val.split() if g.strip()]
+                        break
+                    elif isinstance(val, list):
+                        genes = [str(g).strip() for g in val if str(g).strip()]
+                        break
+                node_genes[nid] = genes
+
+        elif "edges" in aspect:
+            for edge in aspect["edges"]:
+                edges.append((edge["s"], edge["t"]))
+
+    return node_names, node_genes, edges
+
+
+def compute_altered_genes(mut_df: pd.DataFrame, cnv_df: pd.DataFrame,
+                          fusions_df: pd.DataFrame, sample_ids: list,
+                          min_freq: float) -> set[str]:
+    """Return gene symbols altered in >= min_freq fraction of samples (any data type)."""
+    sample_set = set(sample_ids)
+    threshold = min_freq * len(sample_ids)
+    gene_samples: dict[str, set] = {}
+
+    def record(gene: str, sample: str):
+        if gene and sample in sample_set:
+            gene_samples.setdefault(gene, set()).add(sample)
+
+    gene_col_candidates = ["gene.hugoGeneSymbol", "hugoGeneSymbol"]
+
+    if not mut_df.empty:
+        gc = next((c for c in gene_col_candidates if c in mut_df.columns), None)
+        if gc:
+            for _, row in mut_df.iterrows():
+                record(str(row.get(gc, "") or "").strip(), str(row.get("sampleId", "")))
+
+    if not cnv_df.empty:
+        gc = next((c for c in gene_col_candidates if c in cnv_df.columns), None)
+        vc = next((c for c in ["alteration", "value"] if c in cnv_df.columns), None)
+        if gc and vc:
+            for _, row in cnv_df.iterrows():
+                try:
+                    v = int(float(row.get(vc, 0)))
+                except (ValueError, TypeError):
+                    continue
+                if v <= CNV_DEEP_DELETION or v >= CNV_AMPLIFICATION:
+                    record(str(row.get(gc, "") or "").strip(), str(row.get("sampleId", "")))
+
+    if not fusions_df.empty:
+        sv_cols = [c for c in ["site1HugoSymbol", "site2HugoSymbol",
+                                "site1.hugoSymbol", "site2.hugoSymbol",
+                                "gene1.hugoGeneSymbol", "gene2.hugoGeneSymbol"]
+                   if c in fusions_df.columns]
+        if not sv_cols:
+            sv_cols = [c for c in gene_col_candidates if c in fusions_df.columns]
+        for _, row in fusions_df.iterrows():
+            s = str(row.get("sampleId", ""))
+            for col in sv_cols:
+                record(str(row.get(col, "") or "").strip(), s)
+
+    return {g for g, samples in gene_samples.items() if g and len(samples) >= threshold}
+
+
+def build_ontology_from_ndex(uuid: str, gene_set: set) -> tuple[dict, list]:
+    """
+    Download hierarchy from NDEx and build gene2ind + ontology rows filtered to gene_set.
+
+    Returns:
+        gene2ind     : {gene_symbol: index}  sorted alphabetically
+        ontology_rows: [(parent, child, relation)]  ready to write as ontology.txt
+    """
+    print(f"\nDownloading NDEx network {uuid} ...")
+    cx2_data = download_ndex_cx2(uuid)
+    node_names, node_genes, raw_edges = parse_cx2_hierarchy(cx2_data)
+    all_network_genes = {g for genes in node_genes.values() for g in genes}
+    print(f"  {len(node_names)} nodes, {len(raw_edges)} edges, "
+          f"{len(all_network_genes)} unique gene members in network")
+
+    # Filter gene members to the requested gene_set
+    filtered: dict[int, list] = {
+        nid: [g for g in genes if g in gene_set]
+        for nid, genes in node_genes.items()
+    }
+
+    # Build children map for subtree gene counting
+    children_of: dict[int, list] = {}
+    for src, tgt in raw_edges:
+        children_of.setdefault(src, []).append(tgt)
+
+    def subtree_genes(nid: int, visited: set | None = None) -> set:
+        if visited is None:
+            visited = set()
+        if nid in visited:
+            return set()
+        visited.add(nid)
+        result = set(filtered.get(nid, []))
+        for child in children_of.get(nid, []):
+            result |= subtree_genes(child, visited)
+        return result
+
+    terms_with_genes = {nid for nid in node_names if subtree_genes(nid)}
+
+    all_annotated = {g for nid in terms_with_genes for g in filtered.get(nid, [])}
+    print(f"  Input gene set: {len(gene_set)} genes")
+    print(f"  Genes annotated in ontology: {len(all_annotated)}")
+    print(f"  Terms with genes: {len(terms_with_genes)} / {len(node_names)}")
+
+    if not all_annotated:
+        raise ValueError(
+            "No genes from the selected set are annotated in this NDEx hierarchy. "
+            "Check that gene symbols match (HGNC format expected)."
+        )
+
+    gene2ind = {g: i for i, g in enumerate(sorted(all_annotated))}
+
+    ontology_rows: list[tuple] = []
+    for src, tgt in raw_edges:
+        if src in terms_with_genes and tgt in terms_with_genes:
+            ontology_rows.append((node_names[src], node_names[tgt], "default"))
+    for nid in terms_with_genes:
+        for gene in filtered.get(nid, []):
+            ontology_rows.append((node_names[nid], gene, "gene"))
+
+    n_term_edges = sum(1 for r in ontology_rows if r[2] == "default")
+    n_gene_edges = sum(1 for r in ontology_rows if r[2] == "gene")
+    print(f"  Ontology: {len(terms_with_genes)} terms, "
+          f"{n_term_edges} hierarchy edges, {n_gene_edges} gene annotations")
+
+    # Validate with networkx
+    try:
+        import networkx as nx
+        G = nx.DiGraph((p, c) for p, c, r in ontology_rows if r == "default")
+        roots = [n for n in G.nodes if G.in_degree(n) == 0]
+        n_comp = nx.number_connected_components(G.to_undirected())
+        if len(roots) == 1 and n_comp == 1:
+            print(f"  ✓ Single root ({roots[0]}), connected hierarchy")
+        else:
+            print(f"  ⚠ {len(roots)} root(s), {n_comp} connected component(s) — "
+                  f"gene filtering may have fragmented the hierarchy. "
+                  f"Training will validate and report errors.")
+    except ImportError:
+        pass
+
+    return gene2ind, ontology_rows
+
+
+def save_gene2ind(gene2ind: dict, path: Path):
+    with open(path, "w") as f:
+        for gene, idx in sorted(gene2ind.items(), key=lambda x: x[1]):
+            f.write(f"{idx}\t{gene}\n")
+
+
+def save_ontology(ontology_rows: list, path: Path):
+    with open(path, "w") as f:
+        for parent, child, relation in ontology_rows:
+            f.write(f"{parent}\t{child}\t{relation}\n")
+
+
+def interactive_ontology_selection(
+    mut_df: pd.DataFrame, cnv_df: pd.DataFrame,
+    fusions_df: pd.DataFrame, sample_ids: list,
+    default_uuid: str,
+    ndex_uuid_arg: str | None,
+    min_freq_arg: float | None,
+    gene_list_arg: str | None,
+) -> tuple[dict, list, dict] | None:
+    """
+    Ask the user how to select the gene panel and ontology hierarchy.
+    Returns (gene2ind, ontology_rows, selection_metadata) for custom, or None to use default files.
+    selection_metadata keys: ndex_uuid, min_alt_freq (float|None), gene_list_file (str|None), gene_count
+    """
+    print("\n" + "=" * 60)
+    print("GENE PANEL & HIERARCHY SELECTION")
+    print("=" * 60)
+
+    if ndex_uuid_arg:
+        uuid = ndex_uuid_arg
+    else:
+        print("  [0] Use default  (data/gene2ind.txt + data/ontology.txt)")
+        print("  [1] Build from NDEx hierarchy (custom gene set)")
+        raw = input("\nChoice [0]: ").strip()
+        if raw != "1":
+            return None
+        print(f"\nEnter NDEx hierarchy UUID (press Enter for default NeST hierarchy):")
+        raw = input(f"  UUID [{default_uuid}]: ").strip()
+        uuid = raw if raw else default_uuid
+
+    # ── Gene set ──────────────────────────────────────────────────────────────
+    gene_set: set[str] | None = None
+    min_freq_used: float | None = None
+    gene_list_file: str | None = None
+
+    if gene_list_arg:
+        with open(gene_list_arg) as fh:
+            gene_set = {line.strip() for line in fh if line.strip()}
+        gene_list_file = gene_list_arg
+        print(f"\nLoaded {len(gene_set)} genes from {gene_list_arg}")
+
+    elif min_freq_arg is not None:
+        gene_set = compute_altered_genes(mut_df, cnv_df, fusions_df, sample_ids, min_freq_arg)
+        min_freq_used = min_freq_arg
+        print(f"\nGenes altered in >= {min_freq_arg*100:.1f}% of {len(sample_ids)} samples: "
+              f"{len(gene_set)}")
+
+    else:
+        print("\nHow should the gene set be determined?")
+        print("  [0] Frequency-based — genes altered in >= X% of this cohort (recommended)")
+        print("  [1] From file       — provide a gene list (one symbol per line)")
+        raw = input("\nChoice [0]: ").strip()
+
+        if raw == "1":
+            path_str = input("  Path to gene list file: ").strip()
+            try:
+                with open(path_str) as fh:
+                    gene_set = {line.strip() for line in fh if line.strip()}
+                gene_list_file = path_str
+                print(f"  Loaded {len(gene_set)} genes from {path_str}")
+            except FileNotFoundError:
+                print(f"  ⚠ File not found — falling back to frequency-based selection.")
+
+        if gene_set is None:
+            print(f"\n  Computing alteration frequencies across {len(sample_ids)} samples ...")
+            print(f"  {'Threshold':>10s}  {'Genes':>6s}")
+            print(f"  {'─'*19}")
+            for pct in [0.5, 1.0, 3.0, 5.0]:
+                n = len(compute_altered_genes(mut_df, cnv_df, fusions_df, sample_ids, pct / 100))
+                print(f"  {pct:>9.1f}%  {n:>6d}")
+
+            raw_freq = input(
+                f"\n  Minimum alteration frequency, e.g. '1%' or '0.01' "
+                f"[default: 1%]: "
+            ).strip()
+            try:
+                if "%" in raw_freq:
+                    min_freq = float(raw_freq.rstrip("%")) / 100
+                else:
+                    min_freq = float(raw_freq) if raw_freq else 0.01
+                    if min_freq > 1:          # user entered e.g. "5" meaning 5%
+                        min_freq /= 100
+            except ValueError:
+                min_freq = 0.01
+            min_freq_used = min_freq
+            gene_set = compute_altered_genes(mut_df, cnv_df, fusions_df, sample_ids, min_freq)
+            print(f"  → {len(gene_set)} genes at >= {min_freq*100:.1f}%")
+
+    gene2ind, ontology_rows = build_ontology_from_ndex(uuid, gene_set)
+    selection_metadata = {
+        "ndex_uuid":     uuid,
+        "min_alt_freq":  min_freq_used,
+        "gene_list_file": gene_list_file,
+        "gene_count":    len(gene2ind),
+    }
+    return gene2ind, ontology_rows, selection_metadata
 
 
 # ── Gene panel ───────────────────────────────────────────────────────────────
@@ -512,7 +806,8 @@ def build_training_data(clinical_df, sample_ids, endpoints):
 # ── README ───────────────────────────────────────────────────────────────────
 
 def write_readme(output_dir, sample_ids, gene2ind, endpoints,
-                 mut_matrix, del_matrix, amp_matrix, fus_matrix, training_df):
+                 mut_matrix, del_matrix, amp_matrix, fus_matrix, training_df,
+                 metadata: dict | None = None):
     lines = []
     w = lines.append
     n_s, n_g = len(sample_ids), len(gene2ind)
@@ -524,6 +819,25 @@ def write_readme(output_dir, sample_ids, gene2ind, endpoints,
     w(f"- **Samples:** {n_s}")
     w(f"- **Gene panel:** {n_g} genes")
     w("")
+
+    if metadata:
+        w("## Data Sources")
+        w("")
+        if "cbioportal_url" in metadata:
+            w(f"- **cBioPortal study:** [{metadata['study_id']}]({metadata['cbioportal_url']})")
+        if "ndex_uuid" in metadata:
+            w(f"- **Ontology (NDEx):** [{metadata['ndex_uuid']}]({metadata['ndex_url']})")
+            if metadata.get("min_alt_freq") is not None:
+                w(f"- **Gene selection:** frequency-filtered — genes altered in "
+                  f"≥ {metadata['min_alt_freq']*100:.1f}% of {n_s} samples "
+                  f"({n_g} genes retained)")
+            elif metadata.get("gene_list_file"):
+                w(f"- **Gene selection:** from file `{metadata['gene_list_file']}` "
+                  f"({n_g} genes matched in ontology)")
+        else:
+            w(f"- **Ontology:** default (`data/ontology.txt`)")
+            w(f"- **Gene panel:** default (`data/gene2ind.txt`, {n_g} genes)")
+        w("")
 
     any_alt = (mut_matrix | del_matrix | amp_matrix | fus_matrix)
     w("## Feature Matrices")
@@ -597,6 +911,9 @@ def main():
     parser.add_argument("study_id", help="cBioPortal study ID (e.g. laml_tcga_pub, breast_msk_2025)")
     parser.add_argument("--data-dir", help="Base data directory", default="data")
     parser.add_argument("--endpoints-json", help="JSON file with endpoint config (skip interactive)", default=None)
+    parser.add_argument("--ndex-uuid", help=f"NDEx hierarchy UUID (skips interactive prompt; default NeST: {DEFAULT_NDEX_UUID})", default=None)
+    parser.add_argument("--min-alt-freq", type=float, help="Min alteration frequency 0–1 for gene selection with --ndex-uuid (default 0.01)", default=None)
+    parser.add_argument("--gene-list", help="Path to gene list file (one symbol per line) for use with --ndex-uuid", default=None)
     args = parser.parse_args()
 
     study_id = args.study_id
@@ -607,7 +924,7 @@ def main():
     output_dir = study_dir / "nest_vnn_input"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Shared gene panel and ontology at data/ level
+    # Fallback gene panel / ontology (used when user chooses default)
     gene2ind_path = data_dir / "gene2ind.txt"
     ontology_path = data_dir / "ontology.txt"
 
@@ -616,25 +933,15 @@ def main():
     print("=" * 60)
     print(f"Study:    {study_id}")
     print(f"Input:    {input_dir}")
-    print(f"Output:   {output_dir}")
-    print(f"Gene map: {gene2ind_path}\n")
-
-    # Validate
-    for p in [gene2ind_path, ontology_path]:
-        if not p.exists():
-            print(f"ERROR: {p} not found.")
-            print(f"Copy gene2ind.txt and ontology.txt from nest_vnn/sample/ to {data_dir}/")
-            sys.exit(1)
+    print(f"Output:   {output_dir}\n")
 
     mutations_path = input_dir / "mutations.csv"
     if not mutations_path.exists():
         print(f"ERROR: {mutations_path} not found. Run cbioportal_download.py {study_id} first.")
         sys.exit(1)
 
-    # Load
-    gene2ind = load_gene_panel(gene2ind_path)
-
-    print("\nLoading data ...")
+    # Load genomic + clinical data
+    print("Loading data ...")
     mutations_df = pd.read_csv(mutations_path, low_memory=False)
     print(f"  mutations:  {len(mutations_df)} rows")
 
@@ -652,11 +959,34 @@ def main():
     clinical_df = pd.read_csv(clinical_path, low_memory=False) if clinical_path.exists() else pd.DataFrame()
     print(f"  clinical:   {len(clinical_df)} rows ({clinical_path.name})")
 
-    # Sample universe
     sample_ids = sorted(mutations_df["sampleId"].unique())
     print(f"\nTotal unique samples: {len(sample_ids)}")
 
-    # Endpoint selection
+    # ── Gene panel & ontology selection ──────────────────────────────────────
+    ndex_result = interactive_ontology_selection(
+        mutations_df, cnv_df, fusions_df, sample_ids,
+        default_uuid=DEFAULT_NDEX_UUID,
+        ndex_uuid_arg=args.ndex_uuid,
+        min_freq_arg=args.min_alt_freq,
+        gene_list_arg=args.gene_list,
+    )
+
+    ndex_metadata: dict | None = None
+    if ndex_result is not None:
+        gene2ind, ontology_rows, ndex_metadata = ndex_result
+        use_default_ontology = False
+    else:
+        for p in [gene2ind_path, ontology_path]:
+            if not p.exists():
+                print(f"ERROR: {p} not found.")
+                print(f"Copy gene2ind.txt and ontology.txt to {data_dir}/ or use --ndex-uuid.")
+                sys.exit(1)
+        gene2ind = load_gene_panel(gene2ind_path)
+        ontology_rows = None
+        use_default_ontology = True
+        print(f"\nGene panel: {len(gene2ind)} genes from {gene2ind_path}")
+
+    # ── Endpoint selection ────────────────────────────────────────────────────
     if args.endpoints_json:
         with open(args.endpoints_json) as f:
             endpoints = json.load(f)
@@ -664,14 +994,13 @@ def main():
     else:
         endpoints = interactive_endpoint_selection(clinical_df)
 
-    # Save endpoint config for reproducibility
     if endpoints:
         config_path = output_dir / "endpoints.json"
         with open(config_path, "w") as f:
             json.dump(endpoints, f, indent=2)
         print(f"\nEndpoint config saved to {config_path} (reuse with --endpoints-json)")
 
-    # Build matrices
+    # ── Build matrices ────────────────────────────────────────────────────────
     print("\nBuilding NeST-VNN matrices ...")
     cell2ind_df = build_cell2ind(sample_ids)
     mut_matrix = build_mutation_matrix(mutations_df, sample_ids, gene2ind)
@@ -679,14 +1008,18 @@ def main():
     fus_matrix = build_fusion_matrix(fusions_df, sample_ids, gene2ind)
     training_df = build_training_data(clinical_df, sample_ids, endpoints)
 
-    # Write output files
+    # ── Write output files ────────────────────────────────────────────────────
     print(f"\nWriting to {output_dir}/ ...")
 
     save_tsv(cell2ind_df, output_dir / "cell2ind.txt")
     print(f"  ✓ cell2ind.txt          ({len(cell2ind_df)} samples)")
 
-    shutil.copy(gene2ind_path, output_dir / "gene2ind.txt")
-    print(f"  ✓ gene2ind.txt          (from {gene2ind_path})")
+    if use_default_ontology:
+        shutil.copy(gene2ind_path, output_dir / "gene2ind.txt")
+        print(f"  ✓ gene2ind.txt          (from {gene2ind_path})")
+    else:
+        save_gene2ind(gene2ind, output_dir / "gene2ind.txt")
+        print(f"  ✓ gene2ind.txt          ({len(gene2ind)} genes from NDEx)")
 
     save_matrix(mut_matrix, output_dir / "cell2mutation.txt")
     print(f"  ✓ cell2mutation.txt     ({mut_matrix.shape})")
@@ -700,8 +1033,12 @@ def main():
     save_matrix(fus_matrix, output_dir / "cell2fusion.txt")
     print(f"  ✓ cell2fusion.txt       ({fus_matrix.shape})")
 
-    shutil.copy(ontology_path, output_dir / "ontology.txt")
-    print(f"  ✓ ontology.txt          (from {ontology_path})")
+    if use_default_ontology:
+        shutil.copy(ontology_path, output_dir / "ontology.txt")
+        print(f"  ✓ ontology.txt          (from {ontology_path})")
+    else:
+        save_ontology(ontology_rows, output_dir / "ontology.txt")
+        print(f"  ✓ ontology.txt          ({len(ontology_rows)} rows from NDEx)")
 
     if not training_df.empty:
         training_df.to_csv(output_dir / "training_data.txt", sep="\t", index=False)
@@ -711,8 +1048,27 @@ def main():
     save_tsv(std_df, output_dir / "std.txt")
     print(f"  ✓ std.txt")
 
+    # Write metadata.json for downstream MLflow logging
+    readme_metadata: dict = {
+        "study_id":       study_id,
+        "cbioportal_url": f"https://www.cbioportal.org/study/summary?id={study_id}",
+    }
+    if ndex_metadata:
+        uuid = ndex_metadata["ndex_uuid"]
+        readme_metadata.update({
+            "ndex_uuid":    uuid,
+            "ndex_url":     f"https://www.ndexbio.org/viewer/networks/{uuid}",
+            "min_alt_freq": ndex_metadata.get("min_alt_freq"),
+            "gene_list_file": ndex_metadata.get("gene_list_file"),
+            "gene_count":   ndex_metadata["gene_count"],
+        })
+    with open(output_dir / "metadata.json", "w") as f:
+        json.dump(readme_metadata, f, indent=2)
+    print(f"  ✓ metadata.json")
+
     write_readme(output_dir, sample_ids, gene2ind, endpoints,
-                 mut_matrix, del_matrix, amp_matrix, fus_matrix, training_df)
+                 mut_matrix, del_matrix, amp_matrix, fus_matrix, training_df,
+                 metadata=readme_metadata)
 
     print(f"\n{'='*60}")
     print(f"DONE. Output in: {output_dir.resolve()}")

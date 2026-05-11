@@ -1,21 +1,23 @@
 #!/bin/bash
 # Train NeST-VNN for a cBioPortal study
-# Usage: bash train.sh <study_id> <label> <task> [cuda_id]
+# Usage: bash train.sh <study_id> <label> <task> [cuda_id] [mlflow]
 # Examples:
 #   bash train.sh laml_tcga_pub binary_os binary
 #   bash train.sh laml_tcga_pub os_months continuous
-#   bash train.sh breast_msk_2025 binary_overall_survival_status binary 0
+#   bash train.sh breast_msk_2025 binary_overall_survival_status binary 0 mlflow
 
 set -e
 
-STUDY_ID="${1:?Usage: bash train.sh <study_id> <label> <task> [cuda_id]}"
+STUDY_ID="${1:?Usage: bash train.sh <study_id> <label> <task> [cuda_id] [mlflow]}"
 LABEL="${2:?Specify label column (e.g. binary_os, os_months)}"
 TASK="${3:?Specify task type (binary or continuous)}"
 CUDA_ID="${4:-0}"
+MLFLOW_FLAG=""
+if [ "${5}" = "mlflow" ]; then MLFLOW_FLAG="-mlflow"; fi
 DATA_DIR="data"
 
 NEST_DIR="${DATA_DIR}/output/${STUDY_ID}/nest_vnn_input"
-MODEL_DIR="${DATA_DIR}/output/${STUDY_ID}/model"
+MODEL_DIR="${DATA_DIR}/output/${STUDY_ID}/${LABEL}/model"
 
 mkdir -p "${MODEL_DIR}"
 
@@ -45,4 +47,5 @@ python src/train.py \
     -epoch 200 \
     -batchsize 512 \
     -optimize 1 \
-    -zscore_method auc
+    -zscore_method auc \
+    ${MLFLOW_FLAG}

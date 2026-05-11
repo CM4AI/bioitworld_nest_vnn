@@ -1,21 +1,23 @@
 #!/bin/bash
 # Predict with a trained NeST-VNN model
-# Usage: bash predict.sh <study_id> <label> <task> [cuda_id]
+# Usage: bash predict.sh <study_id> <label> <task> [cuda_id] [mlflow]
 # Examples:
 #   bash predict.sh laml_tcga_pub binary_os binary
-#   bash predict.sh breast_msk_2025 binary_overall_survival_status binary
+#   bash predict.sh breast_msk_2025 binary_overall_survival_status binary 0 mlflow
 
 set -e
 
-STUDY_ID="${1:?Usage: bash predict.sh <study_id> <label> <task> [cuda_id]}"
+STUDY_ID="${1:?Usage: bash predict.sh <study_id> <label> <task> [cuda_id] [mlflow]}"
 LABEL="${2:?Specify label column}"
 TASK="${3:?Specify task type (binary or continuous)}"
 CUDA_ID="${4:-0}"
+MLFLOW_FLAG=""
+if [ "${5}" = "mlflow" ]; then MLFLOW_FLAG="-mlflow"; fi
 DATA_DIR="data"
 
 NEST_DIR="${DATA_DIR}/output/${STUDY_ID}/nest_vnn_input"
-MODEL_DIR="${DATA_DIR}/output/${STUDY_ID}/model"
-METRICS_DIR="${DATA_DIR}/output/${STUDY_ID}/metrics"
+MODEL_DIR="${DATA_DIR}/output/${STUDY_ID}/${LABEL}/model"
+METRICS_DIR="${DATA_DIR}/output/${STUDY_ID}/${LABEL}/metrics"
 
 mkdir -p "${METRICS_DIR}/hidden"
 
@@ -44,4 +46,5 @@ python src/predict.py \
     -result "${METRICS_DIR}/predict" \
     -cuda "${CUDA_ID}" \
     -zscore_method auc \
-    -batchsize 64
+    -batchsize 64 \
+    ${MLFLOW_FLAG}

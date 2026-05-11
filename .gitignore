@@ -208,3 +208,6 @@ pyrightconfig.json
 data/*
 !data/gene2ind.txt
 !data/ontology.txt
+mlflow.db
+mlruns/
+CLAUDE.md

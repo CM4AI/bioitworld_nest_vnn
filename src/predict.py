@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import util
 
 
-def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, result_file, cell_features, task):
+def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, result_file, cell_features, task, mlflow_enabled=False):
 
 	feature_dim = gene_dim
 
@@ -83,9 +83,41 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 		# Save probabilities and binary predictions
 		np.savetxt(result_file + '_probabilities.txt', test_probs.cpu().numpy(), '%.4e')
 		np.savetxt(result_file + '_predictions.txt', test_preds_binary.cpu().numpy(), '%d')
+		metric_value, metric_name = acc.item(), "test_accuracy"
 	else:
 		test_corr = util.pearson_corr(test_predict, predict_label_gpu)
 		print("Test correlation\t%s\t%.4f" % (model.root, test_corr))
+		metric_value, metric_name = float(test_corr), "test_pearson_r"
+
+	if mlflow_enabled:
+		try:
+			import mlflow
+			from pathlib import Path
+			from mlflow.data.http_dataset_source import HTTPDatasetSource
+			from mlflow.data.meta_dataset import MetaDataset
+			mlflow.set_experiment("nest_vnn")
+			model_path = Path(model_file)
+			study_id = (model_path.parts[model_path.parts.index("output") + 1]
+			            if "output" in model_path.parts else "unknown")
+			# Read training run_id saved by vnn_trainer
+			run_id_path = model_path.parent / "mlflow_run_id.txt"
+			training_run_id = run_id_path.read_text().strip() if run_id_path.exists() else None
+			run_kwargs = {"parent_run_id": training_run_id} if training_run_id else {}
+			with mlflow.start_run(**run_kwargs) as active_run:
+				mlflow.log_params({"study_id": study_id})
+				mlflow.log_metric(metric_name, metric_value)
+				mlflow.log_artifact(model_file)
+				if training_run_id:
+					src = HTTPDatasetSource(url=f"mlflow://runs/{training_run_id}")
+					mlflow.log_input(
+						MetaDataset(source=src, name="training_run"),
+						context="training_run",
+					)
+				# Persist run_id so annotate step can resume this run to log artifacts
+				predict_run_id_path = Path(result_file).parent / "mlflow_run_id.txt"
+				predict_run_id_path.write_text(active_run.info.run_id)
+		except ImportError:
+			print("Warning: mlflow not installed; skipping MLflow logging.")
 
 	np.savetxt(result_file + '.txt', test_predict.cpu().numpy(),'%.4e')
 
@@ -107,6 +139,7 @@ parser.add_argument('-task', help = 'Task type: continuous or binary', type = st
 parser.add_argument('-label', help = 'Label column to use from test data', type = str, default = None)
 parser.add_argument('-zscore_method', help='zscore method (zscore/robustz)', type=str)
 parser.add_argument('-std', help = 'Standardization File', type = str)
+parser.add_argument('-mlflow', help = 'Enable MLflow experiment tracking', action = 'store_true')
 
 opt = parser.parse_args()
 torch.set_printoptions(precision=5)
@@ -130,4 +163,4 @@ num_genes = len(gene2id_mapping)
 
 CUDA_ID = opt.cuda
 
-predict(predict_data, num_genes, opt.load, opt.hidden, opt.batchsize, opt.result, cell_features, opt.task)
+predict(predict_data, num_genes, opt.load, opt.hidden, opt.batchsize, opt.result, cell_features, opt.task, mlflow_enabled=opt.mlflow)

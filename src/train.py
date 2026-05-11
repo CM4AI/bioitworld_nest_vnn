@@ -34,6 +34,7 @@ def main():
 	parser.add_argument('-delta', help = 'Minimum change in loss to be considered an improvement', type = float, default = 0.001)
 	parser.add_argument('-min_dropout_layer', help = 'Start dropout from this Layer number', type = int, default = 2)
 	parser.add_argument('-dropout_fraction', help = 'Dropout Fraction', type = float, default = 0.3)
+	parser.add_argument('-mlflow', help = 'Enable MLflow experiment tracking', action = 'store_true')
 
 	opt = parser.parse_args()
 	data_wrapper = TrainingDataWrapper(opt)
