@@ -36,7 +36,7 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 			saved_grads[element] = grad
 		return savegrad_hook
 
-	for i, (inputdata, labels) in enumerate(test_loader):
+	for batch_idx, (inputdata, labels) in enumerate(test_loader):
 		# Convert torch tensor to Variable
 		features = util.build_input_vector(inputdata, cell_features)
 
@@ -50,9 +50,12 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 		else:
 			test_predict = torch.cat([test_predict, aux_out_map['final'].data], dim=0)
 
+		# First batch overwrites; subsequent batches append within the same run.
+		file_mode = 'wb' if batch_idx == 0 else 'ab'
+
 		for element, hidden_map in hidden_embeddings_map.items():
 			hidden_file = hidden_folder + '/' + element + '.hidden'
-			with open(hidden_file, 'ab') as f:
+			with open(hidden_file, file_mode) as f:
 				np.savetxt(f, hidden_map.data.cpu().numpy(), '%.4e')
 
 		for element, _ in hidden_embeddings_map.items():
@@ -62,16 +65,15 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 		aux_out_map['final'].backward(torch.ones_like(aux_out_map['final']))
 
 		# Save Feature Grads
-		feature_grad = torch.zeros(0,0).cuda(CUDA_ID)
-		for i in range(len(cuda_features[0, 0, :])):
-			feature_grad = cuda_features.grad.data[:, :, i]
-			with open(result_file + '_feature_grad_' + str(i) + '.txt', 'ab') as f:
+		for feat_i in range(len(cuda_features[0, 0, :])):
+			feature_grad = cuda_features.grad.data[:, :, feat_i]
+			with open(result_file + '_feature_grad_' + str(feat_i) + '.txt', file_mode) as f:
 				np.savetxt(f, feature_grad.cpu().numpy(), '%.4e', delimiter='\t')
 
 		# Save Hidden Grads
 		for element, hidden_grad in saved_grads.items():
 			hidden_file = hidden_folder + '/' + element + '.hidden_grad'
-			with open(hidden_file, 'ab') as f:
+			with open(hidden_file, file_mode) as f:
 				np.savetxt(f, hidden_grad.data.cpu().numpy(), '%.4e', delimiter='\t')
 
 	if task == 'binary':

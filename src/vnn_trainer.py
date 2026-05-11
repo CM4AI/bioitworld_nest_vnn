@@ -166,6 +166,10 @@ class VNNTrainer():
 				"zscore_method":       dw.zscore_method,
 				"patience":            dw.patience,
 				"delta":               dw.delta,
+				"num_terms":           len(dw.dG.nodes()),
+				"num_genes":           len(dw.gene_id_mapping),
+				"num_train_samples":   len(self.train_feature),
+				"num_val_samples":     len(self.val_feature),
 			}
 			if meta.get("ndex_uuid"):
 				params["ndex_uuid"] = meta["ndex_uuid"]
@@ -174,6 +178,11 @@ class VNNTrainer():
 			if meta.get("gene_count"):
 				params["gene_count"] = meta["gene_count"]
 			mlflow.log_params(params)
+			mlflow.set_tags({
+				"study_id": meta.get("study_id", study_id),
+				"task":     dw.task,
+				"label":    dw.label_col,
+			})
 
 			# Log cBioPortal study and NDEx hierarchy as dataset inputs
 			if meta.get("cbioportal_url"):
@@ -201,6 +210,10 @@ class VNNTrainer():
 
 		epoch_start_time = time.time()
 		min_loss = None
+		best_val_metric = None
+		best_train_metric = None
+		best_val_loss = None
+		best_epoch = None
 
 		term_mask_map = util.create_term_mask(self.model.term_direct_gene_map, self.model.gene_dim, self.data_wrapper.cuda)
 		for name, param in self.model.named_parameters():
@@ -313,26 +326,40 @@ class VNNTrainer():
 					epoch, train_metric, total_loss, true_auc, pred_auc,
 					val_metric, val_loss, gradnorms, epoch_end_time - epoch_start_time))
 
+			epoch_start_time = epoch_end_time
+
+			if min_loss == None:
+				min_loss = val_loss
+				best_val_metric = val_metric
+				best_train_metric = train_metric
+				best_val_loss = val_loss.item() if torch.is_tensor(val_loss) else float(val_loss)
+				best_epoch = epoch
+				torch.save(self.model, self.data_wrapper.modeldir + '/model_final.pt')
+				print("Model saved at epoch {}".format(epoch))
+			elif min_loss - val_loss > self.data_wrapper.delta:
+				min_loss = val_loss
+				best_val_metric = val_metric
+				best_train_metric = train_metric
+				best_val_loss = val_loss.item() if torch.is_tensor(val_loss) else float(val_loss)
+				best_epoch = epoch
+				torch.save(self.model, self.data_wrapper.modeldir + '/model_final.pt')
+				print("Model saved at epoch {}".format(epoch))
+
 			if mlflow_enabled:
 				import mlflow
-				mlflow.log_metrics({
+				metrics = {
 					f"train_{metric_name}": train_metric,
 					"train_loss": total_loss.item() if torch.is_tensor(total_loss) else float(total_loss),
 					f"val_{metric_name}": val_metric,
 					"val_loss": val_loss.item() if torch.is_tensor(val_loss) else float(val_loss),
 					"grad_norm": float(gradnorms),
-				}, step=epoch)
-
-			epoch_start_time = epoch_end_time
-
-			if min_loss == None:
-				min_loss = val_loss
-				torch.save(self.model, self.data_wrapper.modeldir + '/model_final.pt')
-				print("Model saved at epoch {}".format(epoch))
-			elif min_loss - val_loss > self.data_wrapper.delta:
-				min_loss = val_loss
-				torch.save(self.model, self.data_wrapper.modeldir + '/model_final.pt')
-				print("Model saved at epoch {}".format(epoch))
+				}
+				if best_val_metric is not None:
+					metrics[f"best_val_{metric_name}"] = best_val_metric
+					metrics[f"best_train_{metric_name}"] = best_train_metric
+					metrics["best_val_loss"] = best_val_loss
+					metrics["best_epoch"] = best_epoch
+				mlflow.log_metrics(metrics, step=epoch)
 
 		if mlflow_enabled:
 			import mlflow

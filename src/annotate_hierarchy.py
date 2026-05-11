@@ -738,6 +738,384 @@ renderTable();
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+# ── Patient-level explainability ─────────────────────────────────────────────
+
+class PatientScoreCalculator:
+    """
+    Compute per-patient system and gene importance from hidden embeddings.
+
+    Uses the .hidden files saved by predict.py (actual network activations).
+    For each patient, importance is measured as how far that patient's activation
+    deviates from the population mean, normalised by the population std (z-score).
+
+      - Term importance  = ||z-score(h_i, T)||₂  (L2 norm of the 4D z-scored embedding)
+      - Patient-RLIPP   = term_importance² / Σ child_importance²
+      - Gene importance  = |z-score(h_i, gene)|  (signed scalar z-scored embedding)
+
+    Using z-scores rather than raw magnitudes is necessary because BatchNorm
+    normalises all activations to similar absolute magnitudes, making raw norms
+    nearly identical across patients.
+    """
+
+    def __init__(self, args):
+        self.hidden_dir = Path(args.hidden)
+        self.num_hiddens_genotype = args.genotype_hiddens
+        self.outdir = Path(args.outdir)
+
+        ont = pd.read_csv(
+            args.ontology, sep='\t', header=None,
+            names=['parent', 'child', 'relation'], dtype=str
+        )
+        gene_leaves = set(ont[ont['relation'] == 'gene']['child'])
+        all_nodes = set(ont['parent']) | set(ont['child'])
+        self.terms = sorted(all_nodes - gene_leaves)
+        self.genes = list(
+            pd.read_csv(args.gene2id, sep='\t', header=None, names=['I', 'G'])['G']
+        )
+
+        # Derive sample order from the test/predict file (matches hidden file row order)
+        self.cell_ids = self._load_cell_ids(args)
+
+        # Predicted values for display in the viz
+        pred_path = Path(args.predicted)
+        self.predicted_vals = np.loadtxt(pred_path) if pred_path.exists() else None
+
+        # Child term map for patient-RLIPP
+        self.ont_children: dict[str, list[str]] = {}
+        for _, row in ont.iterrows():
+            if row['relation'] != 'gene':
+                self.ont_children.setdefault(row['parent'], []).append(row['child'])
+
+    def _load_cell_ids(self, args) -> list[str]:
+        test_path = Path(args.test)
+        if test_path.exists():
+            with open(test_path) as f:
+                first = f.readline().strip()
+            if 'cell_line' in first:
+                df = pd.read_csv(test_path, sep='\t', usecols=['cell_line'])
+                return list(df['cell_line'].astype(str))
+            else:
+                df = pd.read_csv(test_path, sep='\t', header=None)
+                return list(df.iloc[:, 0].astype(str))
+        # Fall back to cell2id order
+        return list(
+            pd.read_csv(args.cell2id, sep='\t', header=None, names=['I', 'C'])['C'].astype(str)
+        )
+
+    def _load_hidden(self, name: str, ncols: int):
+        path = self.hidden_dir / f"{name}.hidden"
+        if not path.exists():
+            return None
+        try:
+            data = np.loadtxt(path)
+            if data.ndim == 1:
+                data = data.reshape(-1, 1)
+            return data[:, :ncols]
+        except Exception:
+            return None
+
+    def _zscore(self, mat: np.ndarray) -> np.ndarray:
+        """Z-score each column of mat across rows (population). Returns same shape."""
+        mean = mat.mean(axis=0, keepdims=True)
+        std  = mat.std(axis=0, keepdims=True)
+        std  = np.where(std < 1e-10, 1.0, std)
+        return (mat - mean) / std
+
+    def compute_scores(self):
+        print("\nBuilding patient-level explainability ...")
+
+        # Use training-data row count as the authoritative sample count.
+        # Hidden files may have extra rows if predict.py was run multiple times
+        # before the 'wb' overwrite fix; truncating here handles that.
+        n_samples = len(self.cell_ids)
+        cell_ids  = self.cell_ids
+
+        term_hiddens: dict[str, np.ndarray] = {}
+        for t in self.terms:
+            h = self._load_hidden(t, self.num_hiddens_genotype)
+            if h is not None:
+                term_hiddens[t] = h[:n_samples]   # (n_samples, n_hiddens)
+
+        gene_hiddens: dict[str, np.ndarray] = {}
+        for gene in self.genes:
+            h = self._load_hidden(gene, 1)
+            if h is not None:
+                gene_hiddens[gene] = h[:n_samples].squeeze(-1)   # (n_samples,)
+
+        if not term_hiddens and not gene_hiddens:
+            print("  No .hidden files found — skipping patient scoring.")
+            print("  (Re-run predict.py to generate hidden embedding files.)")
+            return None
+
+        # Term importance: L2 norm of z-scored embedding per patient.
+        # Z-scoring is required because BatchNorm makes raw norms nearly identical
+        # across patients; the z-score shows deviation from the population mean.
+        term_imp: dict[str, np.ndarray] = {}
+        for term, h in term_hiddens.items():
+            z = self._zscore(h)                         # (n_samples, n_hiddens)
+            term_imp[term] = np.linalg.norm(z, axis=1) # (n_samples,)
+
+        # Patient-RLIPP: norm²(parent) / Σ norm²(children)
+        patient_rlipp: dict[str, np.ndarray] = {}
+        for term, imp in term_imp.items():
+            children = self.ont_children.get(term, [])
+            child_imps = [term_imp[c] for c in children if c in term_imp]
+            if not child_imps:
+                continue
+            child_sq = sum(c ** 2 for c in child_imps)
+            rlipp = np.zeros(len(imp))
+            mask = child_sq > 1e-10
+            rlipp[mask] = (imp[mask] ** 2) / child_sq[mask]
+            patient_rlipp[term] = rlipp
+
+        # Gene importance: absolute z-score of the scalar gene embedding
+        gene_imp: dict[str, np.ndarray] = {}
+        for gene, h in gene_hiddens.items():
+            mean, std = h.mean(), h.std()
+            std = std if std > 1e-10 else 1.0
+            gene_imp[gene] = np.abs((h - mean) / std)
+
+        print(f"  {len(term_imp)}/{len(self.terms)} terms, "
+              f"{len(gene_imp)}/{len(self.genes)} genes, {n_samples} samples")
+
+        # Write TSV outputs
+        if term_imp:
+            pd.DataFrame(term_imp, index=cell_ids).rename_axis('cell_id').to_csv(
+                self.outdir / 'patient_term_importance.txt', sep='\t', float_format='%.4f'
+            )
+        if patient_rlipp:
+            pd.DataFrame(patient_rlipp, index=cell_ids).rename_axis('cell_id').to_csv(
+                self.outdir / 'patient_rlipp.txt', sep='\t', float_format='%.4f'
+            )
+        if gene_imp:
+            pd.DataFrame(gene_imp, index=cell_ids).rename_axis('cell_id').to_csv(
+                self.outdir / 'patient_gene_importance.txt', sep='\t', float_format='%.4f'
+            )
+
+        return term_imp, patient_rlipp, gene_imp, cell_ids
+
+
+def build_patient_viz(term_imp, patient_rlipp, gene_imp, cell_ids,
+                      predicted_vals, pop_rlipp_df, outpath, study_id=None):
+    """Build a standalone interactive HTML for per-patient system/gene importance."""
+    import math, json
+
+    def r4(v):
+        try:
+            f = float(v)
+            return 0.0 if (math.isnan(f) or math.isinf(f)) else round(f, 4)
+        except (TypeError, ValueError):
+            return 0.0
+
+    n = len(cell_ids)
+
+    # Compact JSON: {term: [val_p0, val_p1, ...]}  (rounded to 4 dp)
+    term_imp_j    = json.dumps({t: [r4(v) for v in vals] for t, vals in term_imp.items()})
+    pt_rlipp_j    = json.dumps({t: [r4(v) for v in vals] for t, vals in patient_rlipp.items()})
+    gene_imp_j    = json.dumps({g: [r4(v) for v in vals] for g, vals in gene_imp.items()})
+    cell_ids_j    = json.dumps(list(cell_ids))
+    preds_j       = json.dumps([r4(v) for v in predicted_vals[:n]] if predicted_vals is not None else [None] * n)
+    study_id_j    = json.dumps(study_id)
+    pop_rlipp_j   = json.dumps(
+        {row['term']: r4(row['rlipp']) for _, row in pop_rlipp_df.iterrows()}
+        if pop_rlipp_df is not None and not pop_rlipp_df.empty else {}
+    )
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>NeST-VNN Patient Explainability</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{ background: #0e0e0e; color: #ddd; font-family: monospace; font-size: 13px;
+       height: 100vh; display: flex; flex-direction: column; overflow: hidden; }}
+#header {{ padding: 8px 16px; background: #141414; border-bottom: 1px solid #222;
+           display: flex; align-items: center; gap: 20px; flex-shrink: 0; }}
+#header h1 {{ font-size: 14px; color: #7eb8da; }}
+.stat {{ color: #888; font-size: 12px; }}
+#controls {{ padding: 8px 16px; background: #111; border-bottom: 1px solid #1a1a1a;
+             display: flex; align-items: center; gap: 12px; flex-shrink: 0; flex-wrap: wrap; }}
+#controls label {{ color: #888; font-size: 12px; }}
+#patient-search {{ background: #1a1a2e; border: 1px solid #333; color: #ddd;
+                   padding: 4px 8px; font-family: monospace; font-size: 12px;
+                   width: 240px; border-radius: 3px; }}
+#patient-select {{ background: #1a1a2e; border: 1px solid #333; color: #ddd;
+                   padding: 4px 8px; font-family: monospace; font-size: 12px;
+                   width: 240px; border-radius: 3px; }}
+#pred-info {{ color: #f5a623; font-size: 12px; }}
+#cbio-link {{ color: #7eb8da; font-size: 12px; text-decoration: none; border: 1px solid #2a4a6a;
+              border-radius: 3px; padding: 3px 8px; white-space: nowrap; }}
+#cbio-link:hover {{ background: #1a2a3a; }}
+#cbio-link.hidden {{ display: none; }}
+#main {{ display: flex; flex: 1; overflow: hidden; }}
+.panel {{ flex: 1; display: flex; flex-direction: column; border-right: 1px solid #1a1a1a;
+          min-width: 0; }}
+.panel:last-child {{ border-right: none; }}
+.panel-title {{ padding: 6px 10px; background: #111; color: #888; font-size: 11px;
+                text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #1a1a1a;
+                flex-shrink: 0; }}
+.panel-scroll {{ flex: 1; overflow-y: auto; }}
+table {{ width: 100%; border-collapse: collapse; }}
+th {{ text-align: left; padding: 5px 8px; border-bottom: 1px solid #2a2a2a;
+      position: sticky; top: 0; background: #0e0e0e; color: #777; font-size: 11px; }}
+td {{ padding: 4px 8px; border-bottom: 1px solid #141414; white-space: nowrap; }}
+tr:hover td {{ background: #1a2a3a; }}
+.bar {{ display: inline-block; height: 9px; border-radius: 2px; min-width: 1px; vertical-align: middle; }}
+.rlipp-high {{ color: #f5a623; font-weight: bold; }}
+.rlipp-mid  {{ color: #7eb8da; }}
+.rlipp-low  {{ color: #555; }}
+.note {{ padding: 16px; color: #555; font-size: 12px; }}
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>NeST-VNN · Patient-Level Explainability</h1>
+  <span class="stat" id="s-patients"></span>
+  <span class="stat" id="s-terms"></span>
+  <span class="stat" id="s-genes"></span>
+</div>
+<div id="controls">
+  <label>Patient:</label>
+  <input id="patient-search" type="text" placeholder="Search ID …">
+  <select id="patient-select"></select>
+  <span id="pred-info"></span>
+  <a id="cbio-link" href="#" target="_blank" class="hidden">↗ cBioPortal</a>
+</div>
+<div id="main">
+  <div class="panel">
+    <div class="panel-title">
+      Systems · ranked by patient importance
+      <span style="color:#555;font-style:normal;text-transform:none;font-size:10px">
+        &nbsp;Importance = ||z-score of hidden embedding||  &nbsp;|&nbsp;  Pt-RLIPP = imp²/Σchild²  &nbsp;|&nbsp;  Pop-RLIPP = cross-cohort
+      </span>
+    </div>
+    <div class="panel-scroll">
+      <table>
+        <thead><tr>
+          <th>System</th>
+          <th title="L2 norm of z-scored hidden embedding: how far this patient's system activation deviates from the population mean">Importance</th>
+          <th title="Patient-RLIPP: deviation²(parent) / Σdeviation²(children) — how much this system's anomaly exceeds its children's">Pt-RLIPP</th>
+          <th title="Population-level RLIPP from cross-cohort analysis">Pop-RLIPP</th>
+          <th></th>
+        </tr></thead>
+        <tbody id="sys-body"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Genes · ranked by patient importance (top 100)</div>
+    <div class="panel-scroll">
+      <table>
+        <thead><tr>
+          <th>Gene</th>
+          <th title="|z-score| of gene hidden embedding: how far this patient's gene activation deviates from the population">Importance</th>
+          <th></th>
+        </tr></thead>
+        <tbody id="gene-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script>
+const cellIds    = {cell_ids_j};
+const preds      = {preds_j};
+const termImp    = {term_imp_j};
+const ptRlipp    = {pt_rlipp_j};
+const geneImp    = {gene_imp_j};
+const popRlipp   = {pop_rlipp_j};
+const studyId    = {study_id_j};
+
+const termList = Object.keys(termImp);
+const geneList = Object.keys(geneImp);
+const N = cellIds.length;
+
+document.getElementById('s-patients').textContent = N + ' patients';
+document.getElementById('s-terms').textContent    = termList.length + ' systems';
+document.getElementById('s-genes').textContent    = geneList.length + ' genes';
+
+// Build patient selector
+const sel = document.getElementById('patient-select');
+function rebuildSelect(ids) {{
+    sel.innerHTML = '';
+    ids.forEach(({{id, idx}}) => {{
+        const o = document.createElement('option');
+        o.value = idx; o.text = id;
+        sel.appendChild(o);
+    }});
+}}
+const allPatients = cellIds.map((id, idx) => ({{id, idx}}));
+rebuildSelect(allPatients);
+
+function rlippClass(v) {{
+    return v > 1.2 ? 'rlipp-high' : v > 1.0 ? 'rlipp-mid' : 'rlipp-low';
+}}
+
+function render(patIdx) {{
+    const pred = preds[patIdx];
+    const info = document.getElementById('pred-info');
+    info.textContent = pred !== null && pred !== undefined
+        ? 'Prediction: ' + pred.toFixed(4) : '';
+
+    const cbioLink = document.getElementById('cbio-link');
+    if (studyId && cellIds[patIdx]) {{
+        cbioLink.href = 'https://www.cbioportal.org/patient?sampleId=' +
+            encodeURIComponent(cellIds[patIdx]) + '&studyId=' + encodeURIComponent(studyId);
+        cbioLink.classList.remove('hidden');
+    }} else {{
+        cbioLink.classList.add('hidden');
+    }}
+
+    // Systems
+    const termRows = termList.map(t => ({{
+        id:      t,
+        imp:     (termImp[t]  || [])[patIdx] ?? 0,
+        ptR:     (ptRlipp[t]  || [])[patIdx] ?? null,
+        popR:    popRlipp[t]  ?? null,
+    }})).sort((a, b) => b.imp - a.imp);
+
+    const maxImp = termRows.length ? termRows[0].imp || 1 : 1;
+    document.getElementById('sys-body').innerHTML = termRows.map(s => {{
+        const w   = Math.max(1, Math.min(80, (s.imp / maxImp) * 80));
+        const ptS = s.ptR !== null
+            ? `<span class="${{rlippClass(s.ptR)}}">${{s.ptR.toFixed(3)}}</span>` : '—';
+        const ppS = s.popR !== null
+            ? `<span class="${{rlippClass(s.popR)}}">${{s.popR.toFixed(3)}}</span>` : '—';
+        return `<tr><td>${{s.id}}</td><td>${{s.imp.toFixed(4)}}</td>
+            <td>${{ptS}}</td><td>${{ppS}}</td>
+            <td><span class="bar" style="width:${{w}}px;background:#3a6ea8"></span></td></tr>`;
+    }}).join('');
+
+    // Genes (top 100 by importance for this patient)
+    const geneRows = geneList.map(g => ({{
+        id:  g,
+        imp: (geneImp[g] || [])[patIdx] ?? 0,
+    }})).sort((a, b) => b.imp - a.imp).slice(0, 100);
+
+    const maxGImp = geneRows.length ? geneRows[0].imp || 1 : 1;
+    document.getElementById('gene-body').innerHTML = geneRows.map(g => {{
+        const w = Math.max(1, Math.min(80, (g.imp / maxGImp) * 80));
+        return `<tr><td>${{g.id}}</td><td>${{g.imp.toFixed(4)}}</td>
+            <td><span class="bar" style="width:${{w}}px;background:#3a7a50"></span></td></tr>`;
+    }}).join('');
+}}
+
+document.getElementById('patient-search').addEventListener('input', function() {{
+    const q = this.value.toLowerCase();
+    const filtered = allPatients.filter(p => p.id.toLowerCase().includes(q));
+    rebuildSelect(filtered);
+    if (filtered.length) render(filtered[0].idx);
+}});
+sel.addEventListener('change', () => render(parseInt(sel.value)));
+
+if (N > 0) render(allPatients[0].idx);
+</script>
+</body>
+</html>"""
+
+    outpath.write_text(html)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='NeST-VNN Explainability: RLIPP + Annotated Hierarchy'
@@ -795,17 +1173,43 @@ def main():
     outdir = Path(args.outdir)
     G = build_annotated_hierarchy(args.ontology, rlipp_df, gene_df, outdir)
 
+    # Detect cBioPortal study for patient page links
+    meta_path = input_dir / "metadata.json"
+    cbio_study_id = None
+    if meta_path.exists():
+        import json as _json
+        meta = _json.loads(meta_path.read_text())
+        if meta.get("cbioportal_url"):
+            cbio_study_id = meta.get("study_id", args.study_id)
+
+    # Patient-level explainability
+    patient_calc = PatientScoreCalculator(args)
+    patient_result = patient_calc.compute_scores()
+    if patient_result is not None:
+        term_imp, patient_rlipp_scores, gene_imp, cell_ids_used = patient_result
+        patient_html = outdir / 'patient_viz.html'
+        build_patient_viz(
+            term_imp, patient_rlipp_scores, gene_imp, cell_ids_used,
+            patient_calc.predicted_vals, rlipp_df, patient_html,
+            study_id=cbio_study_id,
+        )
+        print(f"  patient_viz.html → {patient_html}")
+
     print(f"\n{'='*60}")
     print(f"DONE. Outputs in: {outdir.resolve()}")
     print(f"{'='*60}")
     print(f"""
 Output files:
-  rlipp_scores.txt           — RLIPP scores for all ontology terms
-  gene_scores.txt            — Gene-level Spearman correlations
+  rlipp_scores.txt            — RLIPP scores for all ontology terms (cross-cohort)
+  gene_scores.txt             — Gene-level Spearman correlations (cross-cohort)
   hierarchy_annotated.graphml — Annotated hierarchy (open in Cytoscape)
-  hierarchy_annotated.cx2    — Annotated hierarchy in CX2 format (NDEx/Cytoscape Web)
-  hierarchy_viz.html         — Interactive HTML visualization (open in browser)
-  top_systems.txt            — Top 20 systems by RLIPP
+  hierarchy_annotated.cx2     — Annotated hierarchy in CX2 format (NDEx/Cytoscape Web)
+  hierarchy_viz.html          — Interactive HTML visualization (open in browser)
+  top_systems.txt             — Top 20 systems by RLIPP
+  patient_term_importance.txt — Per-patient term importance scores (z-scored hidden embedding L2 norms)
+  patient_rlipp.txt           — Per-patient RLIPP scores
+  patient_gene_importance.txt — Per-patient gene importance scores
+  patient_viz.html            — Interactive per-patient explainability viewer
 
 The RLIPP score measures relative local improvement in predictive power:
   RLIPP > 1: the system's hidden representation adds information
@@ -814,6 +1218,14 @@ The RLIPP score measures relative local improvement in predictive power:
   RLIPP < 1: children are more informative than the parent
 """)
 
+    annotation_files = [
+        "rlipp_scores.txt", "gene_scores.txt",
+        "hierarchy_annotated.graphml", "hierarchy_viz.html",
+        "top_systems.txt", "hierarchy_annotated.cx2",
+        "patient_term_importance.txt", "patient_rlipp.txt",
+        "patient_gene_importance.txt", "patient_viz.html",
+    ]
+
     if args.mlflow:
         try:
             import mlflow
@@ -821,11 +1233,7 @@ The RLIPP score measures relative local improvement in predictive power:
             predict_run_id = run_id_path.read_text().strip() if run_id_path.exists() else None
             run_kwargs = {"run_id": predict_run_id} if predict_run_id else {}
             with mlflow.start_run(**run_kwargs):
-                for fname in [
-                    "rlipp_scores.txt", "gene_scores.txt",
-                    "hierarchy_annotated.graphml", "hierarchy_viz.html",
-                    "top_systems.txt", "hierarchy_annotated.cx2",
-                ]:
+                for fname in annotation_files:
                     fpath = outdir / fname
                     if fpath.exists():
                         mlflow.log_artifact(str(fpath), artifact_path="annotation")
