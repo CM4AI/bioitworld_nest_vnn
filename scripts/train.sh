@@ -35,15 +35,14 @@ python src/train.py \
     -mutations "${NEST_DIR}/cell2mutation.txt" \
     -cn_deletions "${NEST_DIR}/cell2cndeletion.txt" \
     -cn_amplifications "${NEST_DIR}/cell2cnamplification.txt" \
-    -fusions "${NEST_DIR}/cell2fusion.txt" \
     -label "${LABEL}" \
     -task "${TASK}" \
     -std "${MODEL_DIR}/std.txt" \
     -model "${MODEL_DIR}" \
     -genotype_hiddens 4 \
-    -lr 0.001 \
+    -lr 0.0001 \
     -cuda "${CUDA_ID}" \
-    -epoch 100 \
+    -epoch 200 \
     -batchsize 512 \
     -optimize 1 \
     -zscore_method auc
