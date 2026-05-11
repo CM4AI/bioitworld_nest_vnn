@@ -93,8 +93,6 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 		try:
 			import mlflow
 			from pathlib import Path
-			from mlflow.data.http_dataset_source import HTTPDatasetSource
-			from mlflow.data.meta_dataset import MetaDataset
 			mlflow.set_experiment("nest_vnn")
 			model_path = Path(model_file)
 			study_id = (model_path.parts[model_path.parts.index("output") + 1]
@@ -107,12 +105,7 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 				mlflow.log_params({"study_id": study_id})
 				mlflow.log_metric(metric_name, metric_value)
 				mlflow.log_artifact(model_file)
-				if training_run_id:
-					src = HTTPDatasetSource(url=f"mlflow://runs/{training_run_id}")
-					mlflow.log_input(
-						MetaDataset(source=src, name="training_run"),
-						context="training_run",
-					)
+
 				# Persist run_id so annotate step can resume this run to log artifacts
 				predict_run_id_path = Path(result_file).parent / "mlflow_run_id.txt"
 				predict_run_id_path.write_text(active_run.info.run_id)

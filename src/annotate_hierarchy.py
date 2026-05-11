@@ -480,7 +480,12 @@ def build_html_viz(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, 
             node['c_pval'] = sf(r.get('c_pval', 1.0), 1.0)
         nodes.append(node)
 
-    # Build ontology maps for pre-computing full gene lists per term (matches CX2 builder)
+    # Build ontology maps for pre-computing gene lists per term.
+    # Note: the NeST ontology propagates gene annotations upward, so every ancestor
+    # term directly lists ALL genes from its subtree. We therefore cannot use
+    # "direct vs inherited" naively — instead we split into:
+    #   term-specific genes: in this term's list but NOT in any immediate child term
+    #   child-system genes:  in any immediate child term's list
     ont_children = {}
     ont_gene_children = {}
     for _, row in ontology.iterrows():
@@ -490,30 +495,20 @@ def build_html_viz(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, 
         else:
             ont_children.setdefault(parent, []).append(child)
 
-    def get_all_desc_genes(term, visited=None):
-        if visited is None:
-            visited = set()
-        if term in visited:
-            return []
-        visited.add(term)
-        result = list(ont_gene_children.get(term, []))
-        for child_term in ont_children.get(term, []):
-            result.extend(get_all_desc_genes(child_term, visited))
-        return result
-
-    # Embed pre-computed gene lists directly in each term node so the JS doesn't need
-    # to traverse edges (which previously only covered the top-50 gene filter).
     for node in nodes:
         term = node['id']
-        direct = sorted(ont_gene_children.get(term, []))
+        own_genes = set(ont_gene_children.get(term, []))
+        child_genes: set = set()
+        for child_term in ont_children.get(term, []):
+            child_genes.update(ont_gene_children.get(child_term, []))
+
+        specific = sorted(own_genes - child_genes)
         node['direct_genes'] = [
             {'id': g, 'rho': sf(gene_scores.get(g, 0.0)), 'p_val': sf(gene_pvals.get(g, 1.0), 1.0)}
-            for g in direct
+            for g in specific
         ]
-        direct_set = set(direct)
-        all_desc = sorted(set(get_all_desc_genes(term)))
         inherited = sorted(
-            [g for g in all_desc if g not in direct_set],
+            child_genes,
             key=lambda g: abs(gene_scores.get(g, 0.0)), reverse=True
         )
         node['descendant_genes'] = [
@@ -706,7 +701,7 @@ function showDetail(termId) {{
     }}
 
     if (directGenes.length > 0) {{
-        html += `<div class="children" style="margin-top:12px"><strong>Direct genes (${{directGenes.length}}):</strong><br>`;
+        html += `<div class="children" style="margin-top:12px"><strong>Term-specific genes (${{directGenes.length}}):</strong> <span style="color:#666;font-size:11px">unique to this system, not in any child</span><br>`;
         directGenes.forEach(g => {{
             const info = ` (ρ=${{g.rho.toFixed(3)}}, p=${{g.p_val.toExponential(1)}})`;
             html += `<span class="child gene">${{g.id}}${{info}}</span>`;
@@ -717,8 +712,8 @@ function showDetail(termId) {{
     if (inheritedGenes.length > 0) {{
         const showCount = Math.min(inheritedGenes.length, 100);
         const label = inheritedGenes.length > showCount
-            ? `All descendant genes (${{inheritedGenes.length}}, showing top ${{showCount}} by |ρ|)`
-            : `All descendant genes (${{inheritedGenes.length}})`;
+            ? `Genes from child systems (${{inheritedGenes.length}}, showing top ${{showCount}} by |ρ|)`
+            : `Genes from child systems (${{inheritedGenes.length}})`;
         html += `<div class="children" style="margin-top:12px"><strong>${{label}}:</strong><br>`;
         inheritedGenes.slice(0, showCount).forEach(g => {{
             const info = ` (ρ=${{g.rho.toFixed(3)}}, p=${{g.p_val.toExponential(1)}})`;

@@ -1,45 +1,169 @@
-# NeST-VNN: A visible neural network model for drug response prediction
-NeST-VNN is an interpretable neural network-based model that predicts
-cell response to a drug. the first explainable data-driven method 
-for cancer therapeutic response prediction, in which cell structure 
-is modeled using a hierarchical map of tumor cell systems.
-This framework integrates information across multiple levels of 
-cancer cell biology to understand drug response, and can serve 
-to identify and explain biomarkers for clinical application.
+# NeST-VNN: Interpretable Neural Network for Cancer Clinical Outcomes
 
-NeST-VNN characterizes each cell line using its genotype;
-the feature vector for each cell is a binary vector representing
-mutational status and copy number variations of the genes 
-used in clinical panels like Foundation Medicine (n=718).
+NeST-VNN is an interpretable neural network that predicts cancer patient clinical outcomes (survival, recurrence, drug response) from tumor genotype. Its structure mirrors a hierarchical biological ontology — each node in the hierarchy becomes a group of PyTorch modules — making predictions explainable at the level of biological systems rather than individual genes.
 
-Related publications (please cite both if you use the repo):
-1) Park, S., Silva, E., Singhal, A. et al. A deep learning model of tumor cell architecture elucidates response and resistance to CDK4/6 inhibitors. Nat Cancer (2024). https://doi.org/10.1038/s43018-024-00740-1
-2) Zhao, Singhal, et al. Cancer Mutations Converge on a Collection of Protein Assemblies to Predict Resistance to Replication Stress. Cancer Discov 1 March 2024; 14 (3): 508–523. https://doi.org/10.1158/2159-8290.CD-23-0641
+Each patient/sample is characterized by binary feature vectors for somatic mutations, copy number deletions, copy number amplifications, and (optionally) gene fusions across genes from clinical panels such as Foundation Medicine (n=718).
 
-# Environment set up for training and testing
+**Related publications (please cite both if you use this repo):**
+1. Park, S., Silva, E., Singhal, A. et al. *A deep learning model of tumor cell architecture elucidates response and resistance to CDK4/6 inhibitors.* Nat Cancer (2024). https://doi.org/10.1038/s43018-024-00740-1
+2. Zhao, Singhal, et al. *Cancer Mutations Converge on a Collection of Protein Assemblies to Predict Resistance to Replication Stress.* Cancer Discov 14 (3): 508–523 (2024). https://doi.org/10.1158/2159-8290.CD-23-0641
 
-# Example using CBioPortal data
-1. Download from cBioPortal
-```
-python scripts/cbioportal_download.py breast_msk_2025
+---
+
+## Environment setup
+
+Requires CUDA 13.0 and a compatible GPU.
+
+```bash
+conda env create -f conda-envs/environment.yml
+conda activate nest_vnn
 ```
 
-2. Transform to NeST-VNN format (interactive endpoint selection)
-```
-python scripts/transform_to_nest_vnn.py breast_msk_2025
+`ndex2` is an optional dependency that enables CX2 output in the annotation step (already included in `requirements.txt`). `mlflow` is also optional and enables experiment tracking.
+
+---
+
+## End-to-end workflow
+
+All commands are run from the repository root. Outputs land in `data/output/<study_id>/<label>/`.
+
+### Interactive launcher (recommended)
+
+```bash
+python scripts/run.py
 ```
 
-3. Train
-```
-bash scripts/train.sh breast_msk_2025 binary_os_status binary
+Presents a menu to download, transform, train, predict+annotate, or download sample data. Lists available studies and labels at each step, shows parameters with defaults, and handles task type (binary/continuous) automatically from `endpoints.json`.
+
+### Step-by-step using bash scripts
+
+**1. Download genomic + clinical data from cBioPortal**
+
+```bash
+python scripts/cbioport_download.py <study_id>
+# e.g. python scripts/cbioport_download.py breast_msk_2025
 ```
 
-4. Predict (generates hidden embeddings for explainability)
-```
-bash scripts/predict.sh breast_msk_2025 binary_os_status binary
+Downloads mutations, copy number, fusion, and clinical data into `data/output/<study_id>/cbioportal_output/`.
+
+**2. Transform to NeST-VNN input format**
+
+```bash
+python scripts/cbioport_transform.py <study_id>
 ```
 
-5. Annotate hierarchy
+Interactive: select clinical endpoints (binary or continuous), choose a frequency threshold for the gene panel, and optionally load a custom gene list and ontology from an NDEx network. Writes all input files to `data/output/<study_id>/nest_vnn_input/`. Also writes `metadata.json` recording the cBioPortal study URL and NDEx network used.
+
+**3. Train**
+
+```bash
+bash scripts/train.sh <study_id> <label> <task> [cuda_id] [mlflow]
+# e.g. bash scripts/train.sh breast_msk_2025 binary_os_status binary 0 mlflow
 ```
-bash scripts/annotate.sh breast_msk_2025 binary_os_status binary 4
+
+- `task`: `binary` for classification, `continuous` for regression
+- `mlflow` (optional fifth argument): enable MLflow experiment tracking under the `nest_vnn` experiment
+
+Saves best model (by validation loss) to `data/output/<study_id>/<label>/model/model_final.pt`.
+
+**4. Predict + Annotate**
+
+```bash
+bash scripts/predict.sh  <study_id> <label> <task> [cuda_id] [mlflow]
+bash scripts/annotate.sh <study_id> <label> <task> [cpu_count]
 ```
+
+Or as a single step via the interactive launcher (`Predict + Annotate` option), which runs both in sequence and optionally logs annotation artifacts to the predict MLflow run.
+
+Predict writes raw outputs and hidden embeddings to `data/output/<study_id>/<label>/metrics/`. Annotate reads those embeddings and writes explainability outputs to `data/output/<study_id>/<label>/annotation/`.
+
+### Sample data (no cBioPortal account needed)
+
+```bash
+python scripts/run.py  # → "Download sample data"
+```
+
+Downloads the original GDSC drug-response dataset (1,244 cell lines, 718 genes, NeST ontology) from [idekerlab/nest_vnn](https://github.com/idekerlab/nest_vnn) and sets it up under `data/output/nest_vnn_sample/nest_vnn_input/`.
+
+---
+
+## Output files
+
+| Path | Description |
+|---|---|
+| `<label>/model/model_final.pt` | Best trained model checkpoint |
+| `<label>/model/std.txt` | Z-score normalization parameters |
+| `<label>/metrics/predict.txt` | Raw model output (logits for binary, z-scores for continuous) |
+| `<label>/metrics/predict_probabilities.txt` | Sigmoid probabilities (binary tasks only) |
+| `<label>/metrics/predict_predictions.txt` | Thresholded binary predictions (binary tasks only) |
+| `<label>/metrics/hidden/<term>.hidden` | Hidden embeddings per ontology term (samples × hidden_dim) |
+| `<label>/metrics/hidden/<gene>.hidden` | Hidden embeddings per gene (samples × 1) |
+| `<label>/annotation/rlipp_scores.txt` | RLIPP scores per ontology term |
+| `<label>/annotation/gene_scores.txt` | Gene-level Spearman correlations |
+| `<label>/annotation/hierarchy_annotated.graphml` | Annotated hierarchy graph (open in Cytoscape) |
+| `<label>/annotation/hierarchy_annotated.cx2` | CX2 format for NDEx/Cytoscape Web (requires `ndex2`) |
+| `<label>/annotation/hierarchy_viz.html` | Standalone interactive browser visualization |
+| `<label>/annotation/top_systems.txt` | Top 20 systems by RLIPP score |
+
+---
+
+## Interpreting explainability metrics
+
+### System-level metrics (`rlipp_scores.txt`)
+
+Each row corresponds to one ontology term (biological system). Scores are computed by fitting Ridge regression + PCA on the term's hidden embeddings versus the model's predictions, then comparing against the same regression fit on the term's children's embeddings.
+
+| Column | Meaning |
+|---|---|
+| `term` | Ontology system identifier (e.g. `NEST:38`) |
+| `rlipp` | **RLIPP score**: ratio of the term's predictive power to its children's combined predictive power (p_rho / c_rho). Values > 1 mean this system adds predictive signal beyond what its child systems capture. |
+| `p_rho` | Spearman ρ between this term's hidden embedding (projected via Ridge+PCA) and the model's predictions. Higher = this system's internal representation is more tightly linked to the predicted outcome. |
+| `p_pval` | p-value for `p_rho`. |
+| `c_rho` | Spearman ρ between the concatenated embeddings of this term's **child systems** and the model's predictions. |
+| `c_pval` | p-value for `c_rho`. |
+
+**RLIPP interpretation:**
+- **RLIPP > 1**: the system's hidden representation captures information that its child systems do not — this system is biologically important for the predicted outcome beyond what can be explained by its sub-systems alone.
+- **RLIPP ≈ 1**: the system's information is mostly explained by its children; little emergent signal at this level.
+- **RLIPP < 1**: the children's combined representations are more predictive than the parent — the parent may be summarising information that is more precisely encoded downstream.
+
+High `p_rho` with low `p_pval` indicates a system whose activation is reliably associated with the clinical outcome across samples.
+
+### Gene-level metrics (`gene_scores.txt`)
+
+Each row corresponds to one gene. Scores are computed directly from each gene's scalar hidden embedding (the output of that gene's feature layer and batchnorm) versus the model's predictions.
+
+| Column | Meaning |
+|---|---|
+| `gene` | Gene symbol (e.g. `TP53`) |
+| `rho` | Spearman ρ between this gene's hidden embedding and the model's predictions. Positive values indicate the gene's activation is associated with higher predicted outcome; negative with lower. |
+| `p_val` | p-value for `rho`. |
+
+Genes are sorted by `|rho|` (absolute correlation). High `|rho|` with low `p_val` indicates a gene whose genomic state (mutation/CNV status) is consistently predictive of the clinical outcome across the sample population.
+
+### Interactive visualization (`hierarchy_viz.html`)
+
+Open in any browser (no server required). Click any system in the left-hand table to see:
+- **RLIPP, P_rho, P_pval, C_rho, C_pval** for that system
+- **Parent and child systems** (clickable to navigate the hierarchy)
+- **Term-specific genes**: genes annotated to this system level that are not inherited from any child system, with their gene-level ρ scores
+- **Genes from child systems**: genes contributed by immediate child systems, sorted by |ρ|
+
+Use the sort and filter controls to focus on high-RLIPP systems or search by name.
+
+---
+
+## Key training parameters
+
+| Flag | Default | Notes |
+|---|---|---|
+| `-task` | `continuous` | `binary` for classification (BCEWithLogits), `continuous` for regression (MSE) |
+| `-label` | — | Column name in `training_data.txt` to use as the target |
+| `-genotype_hiddens` | `4` | Hidden units per ontology term; must be consistent across train/predict/annotate |
+| `-optimize` | `1` | `1` = direct training; `2` = Optuna hyperparameter search then train |
+| `-alpha` | `0.3` | Weight for auxiliary supervision losses on intermediate term outputs |
+| `-epoch` | `200` | Maximum training epochs (early stopping saves best by validation loss) |
+| `-lr` | `0.0001` | AdamW learning rate |
+| `-zscore_method` | `auc` | `auc` = no normalization (use for AUC/binary), `zscore` or `robustz` for continuous labels |
+| `-cuda` | `0` | GPU index |
+| `-mlflow` | off | Enable MLflow tracking; logs params, per-epoch metrics, model artifact, and architecture image |
