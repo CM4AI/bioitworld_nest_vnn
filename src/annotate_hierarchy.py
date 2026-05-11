@@ -870,10 +870,13 @@ class PatientScoreCalculator:
 
         # Gene importance: absolute z-score of the scalar gene embedding
         gene_imp: dict[str, np.ndarray] = {}
+        gene_signed_z: dict[str, np.ndarray] = {}
         for gene, h in gene_hiddens.items():
             mean, std = h.mean(), h.std()
             std = std if std > 1e-10 else 1.0
-            gene_imp[gene] = np.abs((h - mean) / std)
+            z = (h - mean) / std
+            gene_signed_z[gene] = z
+            gene_imp[gene] = np.abs(z)
 
         print(f"  {len(term_imp)}/{len(self.terms)} terms, "
               f"{len(gene_imp)}/{len(self.genes)} genes, {n_samples} samples")
@@ -891,12 +894,17 @@ class PatientScoreCalculator:
             pd.DataFrame(gene_imp, index=cell_ids).rename_axis('cell_id').to_csv(
                 self.outdir / 'patient_gene_importance.txt', sep='\t', float_format='%.4f'
             )
+        if gene_signed_z:
+            pd.DataFrame(gene_signed_z, index=cell_ids).rename_axis('cell_id').to_csv(
+                self.outdir / 'patient_gene_signed_z.txt', sep='\t', float_format='%.4f'
+            )
 
-        return term_imp, patient_rlipp, gene_imp, cell_ids
+        return term_imp, patient_rlipp, gene_imp, gene_signed_z, cell_ids
 
 
-def build_patient_viz(term_imp, patient_rlipp, gene_imp, cell_ids,
-                      predicted_vals, pop_rlipp_df, outpath, study_id=None):
+def build_patient_viz(term_imp, patient_rlipp, gene_imp, gene_signed_z, cell_ids,
+                      predicted_vals, pop_rlipp_df, pop_gene_df, outpath,
+                      study_id=None, task='continuous', label='score'):
     """Build a standalone interactive HTML for per-patient system/gene importance."""
     import math, json
 
@@ -913,12 +921,19 @@ def build_patient_viz(term_imp, patient_rlipp, gene_imp, cell_ids,
     term_imp_j    = json.dumps({t: [r4(v) for v in vals] for t, vals in term_imp.items()})
     pt_rlipp_j    = json.dumps({t: [r4(v) for v in vals] for t, vals in patient_rlipp.items()})
     gene_imp_j    = json.dumps({g: [r4(v) for v in vals] for g, vals in gene_imp.items()})
+    gene_sz_j     = json.dumps({g: [r4(v) for v in vals] for g, vals in gene_signed_z.items()})
     cell_ids_j    = json.dumps(list(cell_ids))
     preds_j       = json.dumps([r4(v) for v in predicted_vals[:n]] if predicted_vals is not None else [None] * n)
     study_id_j    = json.dumps(study_id)
+    task_j        = json.dumps(task)
+    label_j       = json.dumps(label)
     pop_rlipp_j   = json.dumps(
         {row['term']: r4(row['rlipp']) for _, row in pop_rlipp_df.iterrows()}
         if pop_rlipp_df is not None and not pop_rlipp_df.empty else {}
+    )
+    pop_gene_rho_j = json.dumps(
+        {row['gene']: r4(row['rho']) for _, row in pop_gene_df.iterrows()}
+        if pop_gene_df is not None and not pop_gene_df.empty else {}
     )
 
     html = f"""<!DOCTYPE html>
@@ -966,6 +981,11 @@ tr:hover td {{ background: #1a2a3a; }}
 .rlipp-mid  {{ color: #7eb8da; }}
 .rlipp-low  {{ color: #555; }}
 .note {{ padding: 16px; color: #555; font-size: 12px; }}
+#interp-bar {{ padding: 8px 16px; background: #0b0b0b; border-bottom: 1px solid #1a1a1a;
+               display: flex; gap: 24px; align-items: center; flex-shrink: 0; flex-wrap: wrap;
+               font-size: 12px; color: #888; min-height: 32px; }}
+.dir-up {{ color: #e08030; font-weight: bold; }}
+.dir-dn {{ color: #50a870; font-weight: bold; }}
 </style>
 </head>
 <body>
@@ -981,6 +1001,11 @@ tr:hover td {{ background: #1a2a3a; }}
   <select id="patient-select"></select>
   <span id="pred-info"></span>
   <a id="cbio-link" href="#" target="_blank" class="hidden">↗ cBioPortal</a>
+</div>
+<div id="interp-bar">
+  <span id="interp-pred"></span>
+  <span id="interp-top-sys"></span>
+  <span id="interp-top-gene"></span>
 </div>
 <div id="main">
   <div class="panel">
@@ -1010,6 +1035,8 @@ tr:hover td {{ background: #1a2a3a; }}
         <thead><tr>
           <th>Gene</th>
           <th title="|z-score| of gene hidden embedding: how far this patient's gene activation deviates from the population">Importance</th>
+          <th title="Signed z-score: positive = above population mean, negative = below">Signed Z</th>
+          <th title="Direction of this gene's deviation relative to predicted outcome (sign of z × sign of cohort ρ)">Outcome Dir</th>
           <th></th>
         </tr></thead>
         <tbody id="gene-body"></tbody>
@@ -1023,8 +1050,12 @@ const preds      = {preds_j};
 const termImp    = {term_imp_j};
 const ptRlipp    = {pt_rlipp_j};
 const geneImp    = {gene_imp_j};
+const geneSZ     = {gene_sz_j};
 const popRlipp   = {pop_rlipp_j};
+const popGeneRho = {pop_gene_rho_j};
 const studyId    = {study_id_j};
+const task       = {task_j};
+const labelName  = {label_j};
 
 const termList = Object.keys(termImp);
 const geneList = Object.keys(geneImp);
@@ -1051,11 +1082,91 @@ function rlippClass(v) {{
     return v > 1.2 ? 'rlipp-high' : v > 1.0 ? 'rlipp-mid' : 'rlipp-low';
 }}
 
+// Direction: sign(patient z-score) × sign(cohort ρ)
+// +1 → gene deviation pushes toward higher predicted score
+// -1 → gene deviation pushes toward lower predicted score
+//  0 → signal too weak to call
+function geneDir(gene, patIdx) {{
+    const sz  = (geneSZ[gene]    || [])[patIdx] ?? 0;
+    const rho = popGeneRho[gene] ?? 0;
+    if (Math.abs(sz) < 0.5 || Math.abs(rho) < 0.1) return 0;
+    return Math.sign(sz) * Math.sign(rho);
+}}
+
+function dirLabel(dir) {{
+    if (dir > 0) return '<span class="dir-up" title="Gene activation in this patient is associated with higher predicted score">↑ higher</span>';
+    if (dir < 0) return '<span class="dir-dn" title="Gene activation in this patient is associated with lower predicted score">↓ lower</span>';
+    return '<span style="color:#444">—</span>';
+}}
+
+function buildInterp(patIdx) {{
+    const pred = preds[patIdx];
+
+    // 1. Prediction summary
+    let predStr = '';
+    if (pred !== null && pred !== undefined) {{
+        if (task === 'binary') {{
+            const pct = Math.round(pred * 100);
+            const lvl = pred >= 0.7 ? 'high' : pred >= 0.5 ? 'moderate-high'
+                      : pred >= 0.3 ? 'moderate-low' : 'low';
+            predStr = `Pred: <strong style="color:#f5a623">${{pct}}%</strong> — ${{lvl}} ${{labelName}}`;
+        }} else {{
+            const sign = pred >= 0 ? '+' : '';
+            const dir  = pred >= 0 ? 'above' : 'below';
+            predStr = `Pred: <strong style="color:#f5a623">${{sign}}${{pred.toFixed(3)}}</strong> (${{dir}} cohort mean)`;
+        }}
+    }}
+
+    // 2. Top system (highest patient importance)
+    const tRows = Object.keys(termImp)
+        .map(t => ({{ id: t, imp: (termImp[t] || [])[patIdx] ?? 0, popR: popRlipp[t] ?? null }}))
+        .sort((a, b) => b.imp - a.imp);
+    let sysStr = '';
+    if (tRows.length) {{
+        const top = tRows[0];
+        let extra = '';
+        if (top.popR !== null) {{
+            extra = `, pop-RLIPP=${{top.popR.toFixed(2)}}`;
+            if (top.popR > 1.2) extra += ' <span style="color:#f5a623">✓ cohort-validated</span>';
+        }}
+        sysStr = `Top system: <strong>${{top.id}}</strong> (imp=${{top.imp.toFixed(2)}}${{extra}})`;
+    }}
+
+    // 3. Top gene with a clear directional signal
+    let geneStr = '';
+    const gRows = Object.keys(geneImp)
+        .map(g => ({{ id: g, imp: (geneImp[g] || [])[patIdx] ?? 0, sz: (geneSZ[g] || [])[patIdx] ?? 0 }}))
+        .sort((a, b) => b.imp - a.imp);
+    for (const g of gRows.slice(0, 30)) {{
+        const rho = popGeneRho[g.id] ?? 0;
+        if (Math.abs(g.sz) >= 0.8 && Math.abs(rho) >= 0.1) {{
+            const dir    = Math.sign(g.sz) * Math.sign(rho);
+            const szSign = g.sz >= 0 ? '+' : '';
+            const rhoSign = rho >= 0 ? '+' : '';
+            const dirSpan = dir > 0
+                ? '<span class="dir-up">↑ higher</span>'
+                : '<span class="dir-dn">↓ lower</span>';
+            geneStr = `Top gene: <strong>${{g.id}}</strong> (z=${{szSign}}${{g.sz.toFixed(2)}}, cohort ρ=${{rhoSign}}${{rho.toFixed(2)}}) → ${{dirSpan}} ${{labelName}}`;
+            break;
+        }}
+    }}
+    if (!geneStr && gRows.length) {{
+        const g = gRows[0];
+        const szSign = g.sz >= 0 ? '+' : '';
+        geneStr = `Top gene: <strong>${{g.id}}</strong> (z=${{szSign}}${{g.sz.toFixed(2)}}, no clear directional signal)`;
+    }}
+
+    document.getElementById('interp-pred').innerHTML     = predStr;
+    document.getElementById('interp-top-sys').innerHTML  = sysStr;
+    document.getElementById('interp-top-gene').innerHTML = geneStr;
+}}
+
 function render(patIdx) {{
     const pred = preds[patIdx];
     const info = document.getElementById('pred-info');
     info.textContent = pred !== null && pred !== undefined
         ? 'Prediction: ' + pred.toFixed(4) : '';
+    buildInterp(patIdx);
 
     const cbioLink = document.getElementById('cbio-link');
     if (studyId && cellIds[patIdx]) {{
@@ -1090,12 +1201,18 @@ function render(patIdx) {{
     const geneRows = geneList.map(g => ({{
         id:  g,
         imp: (geneImp[g] || [])[patIdx] ?? 0,
+        sz:  (geneSZ[g]  || [])[patIdx] ?? 0,
     }})).sort((a, b) => b.imp - a.imp).slice(0, 100);
 
     const maxGImp = geneRows.length ? geneRows[0].imp || 1 : 1;
     document.getElementById('gene-body').innerHTML = geneRows.map(g => {{
-        const w = Math.max(1, Math.min(80, (g.imp / maxGImp) * 80));
+        const w      = Math.max(1, Math.min(80, (g.imp / maxGImp) * 80));
+        const dir    = geneDir(g.id, patIdx);
+        const szSign = g.sz >= 0 ? '+' : '';
+        const szColor = Math.abs(g.sz) >= 1.5 ? '#ddd' : Math.abs(g.sz) >= 0.8 ? '#999' : '#555';
         return `<tr><td>${{g.id}}</td><td>${{g.imp.toFixed(4)}}</td>
+            <td style="color:${{szColor}}">${{szSign}}${{g.sz.toFixed(3)}}</td>
+            <td>${{dirLabel(dir)}}</td>
             <td><span class="bar" style="width:${{w}}px;background:#3a7a50"></span></td></tr>`;
     }}).join('');
 }}
@@ -1186,12 +1303,14 @@ def main():
     patient_calc = PatientScoreCalculator(args)
     patient_result = patient_calc.compute_scores()
     if patient_result is not None:
-        term_imp, patient_rlipp_scores, gene_imp, cell_ids_used = patient_result
+        term_imp, patient_rlipp_scores, gene_imp, gene_signed_z, cell_ids_used = patient_result
         patient_html = outdir / 'patient_viz.html'
         build_patient_viz(
-            term_imp, patient_rlipp_scores, gene_imp, cell_ids_used,
-            patient_calc.predicted_vals, rlipp_df, patient_html,
+            term_imp, patient_rlipp_scores, gene_imp, gene_signed_z, cell_ids_used,
+            patient_calc.predicted_vals, rlipp_df, gene_df, patient_html,
             study_id=cbio_study_id,
+            task=args.task,
+            label=args.label or 'score',
         )
         print(f"  patient_viz.html → {patient_html}")
 

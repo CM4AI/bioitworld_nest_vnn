@@ -98,12 +98,17 @@ Downloads the original GDSC drug-response dataset (1,244 cell lines, 718 genes, 
 | `<label>/metrics/predict_predictions.txt` | Thresholded binary predictions (binary tasks only) |
 | `<label>/metrics/hidden/<term>.hidden` | Hidden embeddings per ontology term (samples × hidden_dim) |
 | `<label>/metrics/hidden/<gene>.hidden` | Hidden embeddings per gene (samples × 1) |
-| `<label>/annotation/rlipp_scores.txt` | RLIPP scores per ontology term |
-| `<label>/annotation/gene_scores.txt` | Gene-level Spearman correlations |
+| `<label>/annotation/rlipp_scores.txt` | RLIPP scores per ontology term (cross-cohort) |
+| `<label>/annotation/gene_scores.txt` | Gene-level Spearman correlations (cross-cohort) |
 | `<label>/annotation/hierarchy_annotated.graphml` | Annotated hierarchy graph (open in Cytoscape) |
 | `<label>/annotation/hierarchy_annotated.cx2` | CX2 format for NDEx/Cytoscape Web (requires `ndex2`) |
 | `<label>/annotation/hierarchy_viz.html` | Standalone interactive browser visualization |
 | `<label>/annotation/top_systems.txt` | Top 20 systems by RLIPP score |
+| `<label>/annotation/patient_term_importance.txt` | Per-patient system importance scores (samples × terms) |
+| `<label>/annotation/patient_rlipp.txt` | Per-patient RLIPP scores (samples × terms) |
+| `<label>/annotation/patient_gene_importance.txt` | Per-patient gene importance — absolute z-score of hidden embedding (samples × genes) |
+| `<label>/annotation/patient_gene_signed_z.txt` | Per-patient signed gene z-scores — direction of deviation from population mean (samples × genes) |
+| `<label>/annotation/patient_viz.html` | Interactive per-patient explainability viewer |
 
 ---
 
@@ -150,6 +155,25 @@ Open in any browser (no server required). Click any system in the left-hand tabl
 - **Genes from child systems**: genes contributed by immediate child systems, sorted by |ρ|
 
 Use the sort and filter controls to focus on high-RLIPP systems or search by name.
+
+### Patient-level explainability (`patient_viz.html`)
+
+Open in any browser. Select a patient by ID to see:
+
+**Interpretation bar** (auto-generated summary at the top):
+- **Prediction summary**: for binary tasks, displays predicted probability with a high/moderate-high/moderate-low/low label; for continuous tasks, displays the predicted score relative to the cohort mean.
+- **Top system**: the system with the highest importance for this patient, with its population-level RLIPP (marked `✓ cohort-validated` if RLIPP > 1.2).
+- **Top gene with direction**: the most important gene that has a clear directional signal — e.g. "TP53 (z=+2.1, cohort ρ=+0.41) → ↑ higher binary_os_status".
+
+**Systems panel**: all ontology terms ranked by patient importance, with:
+- **Importance**: L2 norm of the z-scored hidden embedding — how far this patient's system activation deviates from the population mean. Z-scoring is necessary because BatchNorm makes raw activation magnitudes nearly identical across patients.
+- **Pt-RLIPP**: patient-specific RLIPP — deviation²(this system) / Σ deviation²(child systems). Values > 1 mean the system's anomaly is larger than what its children explain.
+- **Pop-RLIPP**: cross-cohort RLIPP from `rlipp_scores.txt`.
+
+**Genes panel**: top 100 genes by patient importance, with:
+- **Importance**: |z-score| of the gene's scalar hidden embedding.
+- **Signed Z**: signed z-score — positive means the gene's hidden activation is above the population mean for this patient, negative means below.
+- **Outcome Dir**: direction indicator derived as `sign(signed z) × sign(cohort ρ)`. `↑ higher` (orange) means this gene's deviation is in the direction associated with a higher predicted score; `↓ lower` (green) means the opposite. Shown only when |z| ≥ 0.5 and |cohort ρ| ≥ 0.1; otherwise `—`.
 
 ---
 
@@ -216,4 +240,4 @@ Each gene's multi-omic data (mutation, copy number deletion, copy number amplifi
 | `-lr` | `0.0001` | AdamW learning rate |
 | `-zscore_method` | `auc` | `auc` = no normalization (use for AUC/binary), `zscore` or `robustz` for continuous labels |
 | `-cuda` | `0` | GPU index |
-| `-mlflow` | off | Enable MLflow tracking; logs params, per-epoch metrics, model artifact, and architecture image |
+| `-mlflow` | off | Enable MLflow tracking; logs params, per-epoch `train_loss`/`val_loss`/metric/grad_norm, and running best-epoch snapshots (`best_val_loss`, `best_train_loss`, `best_val_<metric>`, `best_train_<metric>`, `best_epoch`), model artifact, and architecture image |
