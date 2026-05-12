@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import util
 
 
-def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, result_file, cell_features, task, mlflow_enabled=False):
+def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, result_file, cell_features, task, mlflow_enabled=False, label=None):
 
 	feature_dim = gene_dim
 
@@ -102,10 +102,11 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 			# Read training run_id saved by vnn_trainer
 			run_id_path = model_path.parent / "mlflow_run_id.txt"
 			training_run_id = run_id_path.read_text().strip() if run_id_path.exists() else None
-			with mlflow.start_run() as active_run:
-				mlflow.log_params({"study_id": study_id})
-				if training_run_id:
-					mlflow.set_tag("training_run_id", training_run_id)
+			with mlflow.start_run(parent_run_id=training_run_id or None) as active_run:
+				params = {"study_id": study_id}
+				if label:
+					params["label"] = label
+				mlflow.log_params(params)
 				mlflow.log_metric(metric_name, metric_value)
 				mlflow.log_artifact(model_file)
 
@@ -159,4 +160,4 @@ num_genes = len(gene2id_mapping)
 
 CUDA_ID = opt.cuda
 
-predict(predict_data, num_genes, opt.load, opt.hidden, opt.batchsize, opt.result, cell_features, opt.task, mlflow_enabled=opt.mlflow)
+predict(predict_data, num_genes, opt.load, opt.hidden, opt.batchsize, opt.result, cell_features, opt.task, mlflow_enabled=opt.mlflow, label=opt.label)
