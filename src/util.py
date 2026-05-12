@@ -104,7 +104,7 @@ def standardize_data(df, std_df, label_col='auc'):
 	return merged
 
 
-def load_train_data(train_file, cell2id, zscore_method, std_file, label_col=None, task='continuous'):
+def load_train_data(train_file, cell2id, zscore_method, std_file, label_col=None, task='continuous', seed=None):
 	"""Load training data. Supports both legacy (4-col headerless) and new (header) formats."""
 
 	# Peek at first line to detect header
@@ -136,6 +136,8 @@ def load_train_data(train_file, cell2id, zscore_method, std_file, label_col=None
 	val_cell_lines = []
 	val_size = int(len(train_cell_lines)/5)
 
+	if seed is not None:
+		rd.seed(seed)
 	for _ in range(val_size):
 		r = rd.randint(0, len(train_cell_lines) - 1)
 		val_cell_lines.append(train_cell_lines.pop(r))
@@ -243,8 +245,8 @@ def load_pred_data(test_file, cell2id, zscore_method, train_std_file, label_col=
 	return feature, label
 
 
-def prepare_train_data(train_file, cell2id_mapping, zscore_method, std_file, label_col=None, task='continuous'):
-	train_features, val_features, train_labels, val_labels = load_train_data(train_file, cell2id_mapping, zscore_method, std_file, label_col, task)
+def prepare_train_data(train_file, cell2id_mapping, zscore_method, std_file, label_col=None, task='continuous', seed=None):
+	train_features, val_features, train_labels, val_labels = load_train_data(train_file, cell2id_mapping, zscore_method, std_file, label_col, task, seed=seed)
 	return (torch.Tensor(train_features), torch.FloatTensor(train_labels), torch.Tensor(val_features), torch.FloatTensor(val_labels))
 
 

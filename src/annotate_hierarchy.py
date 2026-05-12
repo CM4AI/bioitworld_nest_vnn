@@ -776,8 +776,13 @@ class PatientScoreCalculator:
         # Derive sample order from the test/predict file (matches hidden file row order)
         self.cell_ids = self._load_cell_ids(args)
 
-        # Predicted values for display in the viz
+        # Predicted values for display in the viz; use sigmoid probabilities for binary tasks
+        # so that patient viz percentages and thresholds are in [0,1] probability space.
         pred_path = Path(args.predicted)
+        if getattr(args, 'task', 'continuous') == 'binary':
+            prob_path = pred_path.parent / (pred_path.stem + '_probabilities.txt')
+            if prob_path.exists():
+                pred_path = prob_path
         self.predicted_vals = np.loadtxt(pred_path) if pred_path.exists() else None
 
         # Child term map for patient-RLIPP

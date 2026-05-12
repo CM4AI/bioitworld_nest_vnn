@@ -33,7 +33,7 @@ class OptunaNNTrainer(VNNTrainer):
 		#study.optimize(self.train_model, n_trials=8)
 
 		study = optuna.create_study(direction="maximize")
-		study.optimize(self.train_model, n_trials=1)
+		study.optimize(self.train_model, n_trials=20)
 		return self.print_result(study)
 
 
@@ -67,8 +67,8 @@ class OptunaNNTrainer(VNNTrainer):
 
 		term_mask_map = util.create_term_mask(self.model.term_direct_gene_map, self.model.gene_dim, self.data_wrapper.cuda)
 		for name, param in self.model.named_parameters():
-			term_name = name.split('_')[0]
 			if '_direct_gene_layer.weight' in name:
+				term_name = name.split('_direct_gene_layer')[0]
 				param.data = torch.mul(param.data, term_mask_map[term_name]) * 0.1
 			else:
 				param.data = param.data * 0.1
@@ -76,7 +76,7 @@ class OptunaNNTrainer(VNNTrainer):
 		train_loader = du.DataLoader(du.TensorDataset(self.train_feature, self.train_label), batch_size=self.data_wrapper.batchsize, shuffle=True, drop_last=True)
 		val_loader = du.DataLoader(du.TensorDataset(self.val_feature, self.val_label), batch_size=self.data_wrapper.batchsize, shuffle=True)
 
-		optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.data_wrapper.lr, betas=(0.9, 0.99), eps=1e-05, weight_decay=self.data_wrapper.lr)
+		optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.data_wrapper.lr, betas=(0.9, 0.99), eps=1e-05, weight_decay=self.data_wrapper.wd)
 		optimizer.zero_grad()
 
 		if self.task == 'binary':
@@ -125,7 +125,7 @@ class OptunaNNTrainer(VNNTrainer):
 				for name, param in self.model.named_parameters():
 					if '_direct_gene_layer.weight' not in name:
 						continue
-					term_name = name.split('_')[0]
+					term_name = name.split('_direct_gene_layer')[0]
 					param.grad.data = torch.mul(param.grad.data, term_mask_map[term_name])
 
 				torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
@@ -138,25 +138,26 @@ class OptunaNNTrainer(VNNTrainer):
 			val_predict = torch.zeros(0, 0).cuda(self.data_wrapper.cuda)
 
 			val_loss = 0
-			for i, (inputdata, labels) in enumerate(val_loader):
-				# Convert torch tensor to Variable
-				features = util.build_input_vector(inputdata, self.data_wrapper.cell_features)
-				cuda_features = Variable(features.cuda(self.data_wrapper.cuda))
-				cuda_labels = Variable(labels.cuda(self.data_wrapper.cuda))
+			with torch.no_grad():
+				for i, (inputdata, labels) in enumerate(val_loader):
+					# Convert torch tensor to Variable
+					features = util.build_input_vector(inputdata, self.data_wrapper.cell_features)
+					cuda_features = Variable(features.cuda(self.data_wrapper.cuda))
+					cuda_labels = Variable(labels.cuda(self.data_wrapper.cuda))
 
-				aux_out_map, _ = self.model(cuda_features)
+					aux_out_map, _ = self.model(cuda_features)
 
-				if val_predict.size()[0] == 0:
-					val_predict = aux_out_map['final'].data
-					val_label_gpu = cuda_labels
-				else:
-					val_predict = torch.cat([val_predict, aux_out_map['final'].data], dim=0)
-					val_label_gpu = torch.cat([val_label_gpu, cuda_labels], dim=0)
+					if val_predict.size()[0] == 0:
+						val_predict = aux_out_map['final'].data
+						val_label_gpu = cuda_labels
+					else:
+						val_predict = torch.cat([val_predict, aux_out_map['final'].data], dim=0)
+						val_label_gpu = torch.cat([val_label_gpu, cuda_labels], dim=0)
 
-				for name, output in aux_out_map.items():
-					loss_fn = self._get_loss_fn()
-					if name == 'final':
-						val_loss += loss_fn(output, cuda_labels)
+					for name, output in aux_out_map.items():
+						loss_fn = self._get_loss_fn()
+						if name == 'final':
+							val_loss += loss_fn(output, cuda_labels)
 
 			val_metric, _ = self._compute_metrics(val_predict, val_label_gpu)
 
@@ -174,6 +175,8 @@ class OptunaNNTrainer(VNNTrainer):
 			epoch_start_time = epoch_end_time
 
 			trial.report(val_metric, epoch)
+			if trial.should_prune():
+				raise optuna.exceptions.TrialPruned()
 
 			if min_loss == None:
 				min_loss = val_loss
@@ -186,9 +189,6 @@ class OptunaNNTrainer(VNNTrainer):
 				early_stopping_counter += 1
 				if early_stopping_counter >= self.data_wrapper.patience:
 					break
-
-		if trial.should_prune():
-			raise optuna.exceptions.TrialPruned()
 
 		#torch.save(self.model, self.data_wrapper.modeldir + '/model_trial_' + str(trial.number) + '.pt')
 		return max_metric

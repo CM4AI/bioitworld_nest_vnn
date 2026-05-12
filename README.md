@@ -134,6 +134,8 @@ Each row corresponds to one ontology term (biological system). Scores are comput
 
 High `p_rho` with low `p_pval` indicates a system whose activation is reliably associated with the clinical outcome across samples.
 
+> **Note:** RLIPP scores are computed by regressing term embeddings against the **model's own predictions**, not against ground-truth labels. They measure how the model has organised information internally — which biological systems the network relies on — rather than direct association with the clinical endpoint. If overall model performance is poor (low test correlation or accuracy), RLIPP scores describe a poorly calibrated model and should be interpreted with caution. Always consider test-set performance alongside RLIPP when drawing biological conclusions.
+
 ### Gene-level metrics (`gene_scores.txt`)
 
 Each row corresponds to one gene. Scores are computed directly from each gene's scalar hidden embedding (the output of that gene's feature layer and batchnorm) versus the model's predictions.
@@ -173,7 +175,7 @@ Open in any browser. Select a patient by ID to see:
 **Genes panel**: top 100 genes by patient importance, with:
 - **Importance**: |z-score| of the gene's scalar hidden embedding.
 - **Signed Z**: signed z-score — positive means the gene's hidden activation is above the population mean for this patient, negative means below.
-- **Outcome Dir**: direction indicator derived as `sign(signed z) × sign(cohort ρ)`. `↑ higher` (orange) means this gene's deviation is in the direction associated with a higher predicted score; `↓ lower` (green) means the opposite. Shown only when |z| ≥ 0.5 and |cohort ρ| ≥ 0.1; otherwise `—`.
+- **Outcome Dir**: direction indicator derived as `sign(signed z) × sign(cohort ρ)`. `↑ higher` (orange) means this gene's deviation is in the direction associated with a higher predicted score; `↓ lower` (green) means the opposite. Shown only when |z| ≥ 0.5 and |cohort ρ| ≥ 0.1; otherwise `—`. **This is a heuristic approximation**, not a causal claim: it combines a population-level correlation with an individual patient's embedding deviation and assumes a monotone relationship between the two. Treat it as a hypothesis-generating signal rather than a definitive statement about biological mechanism.
 
 ---
 

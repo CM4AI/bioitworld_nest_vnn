@@ -102,17 +102,18 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 			# Read training run_id saved by vnn_trainer
 			run_id_path = model_path.parent / "mlflow_run_id.txt"
 			training_run_id = run_id_path.read_text().strip() if run_id_path.exists() else None
-			run_kwargs = {"parent_run_id": training_run_id} if training_run_id else {}
-			with mlflow.start_run(**run_kwargs) as active_run:
+			with mlflow.start_run() as active_run:
 				mlflow.log_params({"study_id": study_id})
+				if training_run_id:
+					mlflow.set_tag("training_run_id", training_run_id)
 				mlflow.log_metric(metric_name, metric_value)
 				mlflow.log_artifact(model_file)
 
 				# Persist run_id so annotate step can resume this run to log artifacts
 				predict_run_id_path = Path(result_file).parent / "mlflow_run_id.txt"
 				predict_run_id_path.write_text(active_run.info.run_id)
-		except ImportError:
-			print("Warning: mlflow not installed; skipping MLflow logging.")
+		except Exception as e:
+			print(f"Warning: MLflow logging failed: {e}")
 
 	np.savetxt(result_file + '.txt', test_predict.cpu().numpy(),'%.4e')
 

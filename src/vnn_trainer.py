@@ -216,18 +216,19 @@ class VNNTrainer():
 		best_train_loss = None
 		best_epoch = None
 
+		early_stopping_counter = 0
 		term_mask_map = util.create_term_mask(self.model.term_direct_gene_map, self.model.gene_dim, self.data_wrapper.cuda)
 		for name, param in self.model.named_parameters():
-			term_name = name.split('_')[0]
 			if '_direct_gene_layer.weight' in name:
+				term_name = name.split('_direct_gene_layer')[0]
 				param.data = torch.mul(param.data, term_mask_map[term_name]) * 0.1
 			else:
 				param.data = param.data * 0.1
 
 		train_loader = du.DataLoader(du.TensorDataset(self.train_feature, self.train_label), batch_size=self.data_wrapper.batchsize, shuffle=True, drop_last=False)
-		val_loader = du.DataLoader(du.TensorDataset(self.val_feature, self.val_label), batch_size=self.data_wrapper.batchsize, shuffle=True)
+		val_loader = du.DataLoader(du.TensorDataset(self.val_feature, self.val_label), batch_size=self.data_wrapper.batchsize, shuffle=False)
 
-		optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.data_wrapper.lr, betas=(0.9, 0.99), eps=1e-05, weight_decay=self.data_wrapper.lr)
+		optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.data_wrapper.lr, betas=(0.9, 0.99), eps=1e-05, weight_decay=self.data_wrapper.wd)
 		optimizer.zero_grad()
 
 		if self.task == 'binary':
@@ -240,6 +241,8 @@ class VNNTrainer():
 			self.model.train()
 			train_predict = torch.zeros(0, 0).cuda(self.data_wrapper.cuda)
 			_gradnorms = torch.zeros(len(train_loader)).cuda(self.data_wrapper.cuda)
+			epoch_train_loss = 0.0
+			n_train_batches = 0
 
 			for i, (inputdata, labels) in enumerate(train_loader):
 				features = util.build_input_vector(inputdata, self.data_wrapper.cell_features)
@@ -270,6 +273,8 @@ class VNNTrainer():
 
 				if torch.is_tensor(total_loss) and not torch.isnan(total_loss):
 					total_loss.backward()
+					epoch_train_loss += total_loss.item()
+					n_train_batches += 1
 				else:
 					# Skip this batch if loss is NaN
 					continue
@@ -277,7 +282,7 @@ class VNNTrainer():
 				for name, param in self.model.named_parameters():
 					if '_direct_gene_layer.weight' not in name:
 						continue
-					term_name = name.split('_')[0]
+					term_name = name.split('_direct_gene_layer')[0]
 					param.grad.data = torch.mul(param.grad.data, term_mask_map[term_name])
 
 				# Clip gradients to prevent NaN propagation
@@ -286,75 +291,80 @@ class VNNTrainer():
 				optimizer.step()
 
 			gradnorms = sum(_gradnorms).unsqueeze(0).cpu().numpy()[0]
-			train_metric, _ = self._compute_metrics(train_predict, train_label_gpu)
+			epoch_train_loss = epoch_train_loss / max(n_train_batches, 1)
+			if train_predict.size()[0] == 0:
+				train_metric = float('nan')
+			else:
+				train_metric, _ = self._compute_metrics(train_predict, train_label_gpu)
 
 			self.model.eval()
 
 			val_predict = torch.zeros(0, 0).cuda(self.data_wrapper.cuda)
-			val_loss = 0
+			epoch_val_loss = 0.0
+			n_val_batches = 0
 
-			for i, (inputdata, labels) in enumerate(val_loader):
-				features = util.build_input_vector(inputdata, self.data_wrapper.cell_features)
-				cuda_features = Variable(features.cuda(self.data_wrapper.cuda))
-				cuda_labels = Variable(labels.cuda(self.data_wrapper.cuda))
+			with torch.no_grad():
+				for i, (inputdata, labels) in enumerate(val_loader):
+					features = util.build_input_vector(inputdata, self.data_wrapper.cell_features)
+					cuda_features = Variable(features.cuda(self.data_wrapper.cuda))
+					cuda_labels = Variable(labels.cuda(self.data_wrapper.cuda))
 
-				aux_out_map, _ = self.model(cuda_features)
+					aux_out_map, _ = self.model(cuda_features)
 
-				if val_predict.size()[0] == 0:
-					val_predict = aux_out_map['final'].data
-					val_label_gpu = cuda_labels
-				else:
-					val_predict = torch.cat([val_predict, aux_out_map['final'].data], dim=0)
-					val_label_gpu = torch.cat([val_label_gpu, cuda_labels], dim=0)
+					if val_predict.size()[0] == 0:
+						val_predict = aux_out_map['final'].data
+						val_label_gpu = cuda_labels
+					else:
+						val_predict = torch.cat([val_predict, aux_out_map['final'].data], dim=0)
+						val_label_gpu = torch.cat([val_label_gpu, cuda_labels], dim=0)
 
-				loss_fn = self._get_loss_fn()
-				for name, output in aux_out_map.items():
-					if name == 'final':
-						val_loss += loss_fn(output, cuda_labels)
+					loss_fn = self._get_loss_fn()
+					for name, output in aux_out_map.items():
+						if name == 'final':
+							epoch_val_loss += loss_fn(output, cuda_labels).item()
+							n_val_batches += 1
 
+			epoch_val_loss = epoch_val_loss / max(n_val_batches, 1)
 			val_metric, metric_name = self._compute_metrics(val_predict, val_label_gpu)
 
 			epoch_end_time = time.time()
 
 			if self.task == 'binary':
 				print("{}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}".format(
-					epoch, train_metric, total_loss, val_metric, val_loss,
+					epoch, train_metric, epoch_train_loss, val_metric, epoch_val_loss,
 					gradnorms, epoch_end_time - epoch_start_time))
 			else:
-				true_auc = torch.mean(train_label_gpu)
-				pred_auc = torch.mean(train_predict)
+				true_auc = float(torch.mean(train_label_gpu)) if train_predict.size()[0] > 0 else float('nan')
+				pred_auc = float(torch.mean(train_predict)) if train_predict.size()[0] > 0 else float('nan')
 				print("{}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}".format(
-					epoch, train_metric, total_loss, true_auc, pred_auc,
-					val_metric, val_loss, gradnorms, epoch_end_time - epoch_start_time))
+					epoch, train_metric, epoch_train_loss, true_auc, pred_auc,
+					val_metric, epoch_val_loss, gradnorms, epoch_end_time - epoch_start_time))
 
 			epoch_start_time = epoch_end_time
 
-			if min_loss == None:
-				min_loss = val_loss
+			if min_loss is None or epoch_val_loss < min_loss - self.data_wrapper.delta:
+				min_loss = epoch_val_loss
 				best_val_metric = val_metric
 				best_train_metric = train_metric
-				best_val_loss = val_loss.item() if torch.is_tensor(val_loss) else float(val_loss)
-				best_train_loss = total_loss.item() if torch.is_tensor(total_loss) else float(total_loss)
+				best_val_loss = epoch_val_loss
+				best_train_loss = epoch_train_loss
 				best_epoch = epoch
+				early_stopping_counter = 0
 				torch.save(self.model, self.data_wrapper.modeldir + '/model_final.pt')
 				print("Model saved at epoch {}".format(epoch))
-			elif min_loss - val_loss > self.data_wrapper.delta:
-				min_loss = val_loss
-				best_val_metric = val_metric
-				best_train_metric = train_metric
-				best_val_loss = val_loss.item() if torch.is_tensor(val_loss) else float(val_loss)
-				best_train_loss = total_loss.item() if torch.is_tensor(total_loss) else float(total_loss)
-				best_epoch = epoch
-				torch.save(self.model, self.data_wrapper.modeldir + '/model_final.pt')
-				print("Model saved at epoch {}".format(epoch))
+			else:
+				early_stopping_counter += 1
+				if early_stopping_counter >= self.data_wrapper.patience:
+					print("Early stopping at epoch {}".format(epoch))
+					break
 
 			if mlflow_enabled:
 				import mlflow
 				metrics = {
 					f"train_{metric_name}": train_metric,
-					"train_loss": total_loss.item() if torch.is_tensor(total_loss) else float(total_loss),
+					"train_loss": epoch_train_loss,
 					f"val_{metric_name}": val_metric,
-					"val_loss": val_loss.item() if torch.is_tensor(val_loss) else float(val_loss),
+					"val_loss": epoch_val_loss,
 					"grad_norm": float(gradnorms),
 				}
 				if best_val_metric is not None:
