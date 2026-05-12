@@ -377,6 +377,56 @@ class VNNTrainer():
 
 		if mlflow_enabled:
 			import mlflow
+			import matplotlib
+			matplotlib.use('Agg')
+			import matplotlib.pyplot as plt
+			from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+
+			if self.task == 'binary' and min_loss is not None:
+				best_model = torch.load(
+					self.data_wrapper.modeldir + '/model_final.pt',
+					map_location=f'cuda:{self.data_wrapper.cuda}',
+					weights_only=False,
+				)
+				best_model.cuda(self.data_wrapper.cuda)
+				best_model.eval()
+
+				for split_name, features, labels in [
+					('train', self.train_feature, self.train_label),
+					('val',   self.val_feature,   self.val_label),
+				]:
+					all_preds, all_labels = [], []
+					loader = du.DataLoader(
+						du.TensorDataset(features, labels),
+						batch_size=self.data_wrapper.batchsize,
+						shuffle=False,
+					)
+					with torch.no_grad():
+						for inputdata, batch_labels in loader:
+							feats = util.build_input_vector(inputdata, self.data_wrapper.cell_features)
+							aux_out_map, _ = best_model(feats.cuda(self.data_wrapper.cuda))
+							probs = torch.sigmoid(aux_out_map['final'])
+							preds = (probs >= 0.5).float().cpu().numpy().flatten()
+							all_preds.extend(preds.tolist())
+							all_labels.extend(batch_labels.numpy().flatten().tolist())
+
+					cm = confusion_matrix(all_labels, all_preds)
+					tn, fp, fn, tp = cm.ravel()
+					mlflow.log_metrics({
+						f'{split_name}_cm_tn': int(tn),
+						f'{split_name}_cm_fp': int(fp),
+						f'{split_name}_cm_fn': int(fn),
+						f'{split_name}_cm_tp': int(tp),
+					})
+
+					disp = ConfusionMatrixDisplay(confusion_matrix=cm)
+					fig, ax = plt.subplots(figsize=(4, 4))
+					disp.plot(ax=ax, colorbar=False)
+					ax.set_title(f'Best model — {split_name} split')
+					fig.tight_layout()
+					mlflow.log_figure(fig, f'confusion_matrix_{split_name}.png')
+					plt.close(fig)
+
 			mlflow.log_artifact(self.data_wrapper.modeldir + '/model_final.pt')
 			mlflow.log_artifact(self.data_wrapper.std)
 

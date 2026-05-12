@@ -29,7 +29,7 @@ class TrainingDataWrapper():
 		self.dropout_fraction = args.dropout_fraction
 		self.task = args.task
 		self.label_col = args.label
-		self.mlflow_enabled = getattr(args, 'mlflow', False)
+		self.mlflow_enabled = not getattr(args, 'no_mlflow', False)
 		self.seed = getattr(args, 'seed', None)
 		self.onto = args.onto
 		self.gene2id = args.gene2id

@@ -34,7 +34,8 @@ def main():
 	parser.add_argument('-delta', help = 'Minimum change in loss to be considered an improvement', type = float, default = 0.001)
 	parser.add_argument('-min_dropout_layer', help = 'Start dropout from this Layer number', type = int, default = 2)
 	parser.add_argument('-dropout_fraction', help = 'Dropout Fraction', type = float, default = 0.3)
-	parser.add_argument('-mlflow', help = 'Enable MLflow experiment tracking', action = 'store_true')
+	parser.add_argument('-mlflow',    help = 'Enable MLflow tracking (default: on; kept for backward compat)', action = 'store_true', default = True)
+	parser.add_argument('-no_mlflow', help = 'Disable MLflow experiment tracking', action = 'store_true', default = False)
 	parser.add_argument('-seed', help = 'Random seed for reproducible train/val split', type = int, default = None)
 
 	opt = parser.parse_args()

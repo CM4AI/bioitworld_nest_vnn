@@ -1,18 +1,18 @@
 #!/bin/bash
 # Predict with a trained NeST-VNN model
-# Usage: bash predict.sh <study_id> <label> <task> [cuda_id] [mlflow]
+# Usage: bash predict.sh <study_id> <label> <task> [cuda_id] [no_mlflow]
 # Examples:
 #   bash predict.sh laml_tcga_pub binary_os binary
-#   bash predict.sh breast_msk_2025 binary_overall_survival_status binary 0 mlflow
+#   bash predict.sh breast_msk_2025 binary_overall_survival_status binary 0 no_mlflow
 
 set -e
 
-STUDY_ID="${1:?Usage: bash predict.sh <study_id> <label> <task> [cuda_id] [mlflow]}"
+STUDY_ID="${1:?Usage: bash predict.sh <study_id> <label> <task> [cuda_id] [no_mlflow]}"
 LABEL="${2:?Specify label column}"
 TASK="${3:?Specify task type (binary or continuous)}"
 CUDA_ID="${4:-0}"
 MLFLOW_FLAG=""
-if [ "${5}" = "mlflow" ]; then MLFLOW_FLAG="-mlflow"; fi
+if [ "${5}" = "no_mlflow" ]; then MLFLOW_FLAG="-no_mlflow"; fi
 DATA_DIR="data"
 
 NEST_DIR="${DATA_DIR}/output/${STUDY_ID}/nest_vnn_input"

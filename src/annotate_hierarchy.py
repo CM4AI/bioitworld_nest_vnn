@@ -856,9 +856,11 @@ class PatientScoreCalculator:
         # Z-scoring is required because BatchNorm makes raw norms nearly identical
         # across patients; the z-score shows deviation from the population mean.
         term_imp: dict[str, np.ndarray] = {}
+        term_mean_z: dict[str, np.ndarray] = {}
         for term, h in term_hiddens.items():
-            z = self._zscore(h)                         # (n_samples, n_hiddens)
-            term_imp[term] = np.linalg.norm(z, axis=1) # (n_samples,)
+            z = self._zscore(h)                          # (n_samples, n_hiddens)
+            term_imp[term]    = np.linalg.norm(z, axis=1) # (n_samples,) unsigned
+            term_mean_z[term] = z.mean(axis=1)            # (n_samples,) signed
 
         # Patient-RLIPP: norm²(parent) / Σ norm²(children)
         patient_rlipp: dict[str, np.ndarray] = {}
@@ -903,11 +905,15 @@ class PatientScoreCalculator:
             pd.DataFrame(gene_signed_z, index=cell_ids).rename_axis('cell_id').to_csv(
                 self.outdir / 'patient_gene_signed_z.txt', sep='\t', float_format='%.4f'
             )
+        if term_mean_z:
+            pd.DataFrame(term_mean_z, index=cell_ids).rename_axis('cell_id').to_csv(
+                self.outdir / 'patient_term_mean_z.txt', sep='\t', float_format='%.4f'
+            )
 
-        return term_imp, patient_rlipp, gene_imp, gene_signed_z, cell_ids
+        return term_imp, patient_rlipp, gene_imp, gene_signed_z, term_mean_z, cell_ids
 
 
-def build_patient_viz(term_imp, patient_rlipp, gene_imp, gene_signed_z, cell_ids,
+def build_patient_viz(term_imp, patient_rlipp, gene_imp, gene_signed_z, term_mean_z, cell_ids,
                       predicted_vals, pop_rlipp_df, pop_gene_df, outpath,
                       study_id=None, task='continuous', label='score'):
     """Build a standalone interactive HTML for per-patient system/gene importance."""
@@ -925,6 +931,7 @@ def build_patient_viz(term_imp, patient_rlipp, gene_imp, gene_signed_z, cell_ids
     # Compact JSON: {term: [val_p0, val_p1, ...]}  (rounded to 4 dp)
     term_imp_j    = json.dumps({t: [r4(v) for v in vals] for t, vals in term_imp.items()})
     pt_rlipp_j    = json.dumps({t: [r4(v) for v in vals] for t, vals in patient_rlipp.items()})
+    term_mz_j     = json.dumps({t: [r4(v) for v in vals] for t, vals in term_mean_z.items()})
     gene_imp_j    = json.dumps({g: [r4(v) for v in vals] for g, vals in gene_imp.items()})
     gene_sz_j     = json.dumps({g: [r4(v) for v in vals] for g, vals in gene_signed_z.items()})
     cell_ids_j    = json.dumps(list(cell_ids))
@@ -934,6 +941,10 @@ def build_patient_viz(term_imp, patient_rlipp, gene_imp, gene_signed_z, cell_ids
     label_j       = json.dumps(label)
     pop_rlipp_j   = json.dumps(
         {row['term']: r4(row['rlipp']) for _, row in pop_rlipp_df.iterrows()}
+        if pop_rlipp_df is not None and not pop_rlipp_df.empty else {}
+    )
+    pop_term_prho_j = json.dumps(
+        {row['term']: r4(row['p_rho']) for _, row in pop_rlipp_df.iterrows()}
         if pop_rlipp_df is not None and not pop_rlipp_df.empty else {}
     )
     pop_gene_rho_j = json.dumps(
@@ -1027,6 +1038,7 @@ tr:hover td {{ background: #1a2a3a; }}
           <th title="L2 norm of z-scored hidden embedding: how far this patient's system activation deviates from the population mean">Importance</th>
           <th title="Patient-RLIPP: deviation²(parent) / Σdeviation²(children) — how much this system's anomaly exceeds its children's">Pt-RLIPP</th>
           <th title="Population-level RLIPP from cross-cohort analysis">Pop-RLIPP</th>
+          <th title="Direction: sign(mean z-score across hidden dims) × sign(pop p_rho). Heuristic — see README.">Outcome Dir</th>
           <th></th>
         </tr></thead>
         <tbody id="sys-body"></tbody>
@@ -1050,17 +1062,19 @@ tr:hover td {{ background: #1a2a3a; }}
   </div>
 </div>
 <script>
-const cellIds    = {cell_ids_j};
-const preds      = {preds_j};
-const termImp    = {term_imp_j};
-const ptRlipp    = {pt_rlipp_j};
-const geneImp    = {gene_imp_j};
-const geneSZ     = {gene_sz_j};
-const popRlipp   = {pop_rlipp_j};
-const popGeneRho = {pop_gene_rho_j};
-const studyId    = {study_id_j};
-const task       = {task_j};
-const labelName  = {label_j};
+const cellIds      = {cell_ids_j};
+const preds        = {preds_j};
+const termImp      = {term_imp_j};
+const ptRlipp      = {pt_rlipp_j};
+const termMZ       = {term_mz_j};
+const geneImp      = {gene_imp_j};
+const geneSZ       = {gene_sz_j};
+const popRlipp     = {pop_rlipp_j};
+const popTermPrho  = {pop_term_prho_j};
+const popGeneRho   = {pop_gene_rho_j};
+const studyId      = {study_id_j};
+const task         = {task_j};
+const labelName    = {label_j};
 
 const termList = Object.keys(termImp);
 const geneList = Object.keys(geneImp);
@@ -1087,9 +1101,9 @@ function rlippClass(v) {{
     return v > 1.2 ? 'rlipp-high' : v > 1.0 ? 'rlipp-mid' : 'rlipp-low';
 }}
 
-// Direction: sign(patient z-score) × sign(cohort ρ)
-// +1 → gene deviation pushes toward higher predicted score
-// -1 → gene deviation pushes toward lower predicted score
+// Direction helpers — sign(patient deviation) × sign(cohort ρ / p_rho)
+// +1 → deviation pushes toward higher predicted score
+// -1 → deviation pushes toward lower predicted score
 //  0 → signal too weak to call
 function geneDir(gene, patIdx) {{
     const sz  = (geneSZ[gene]    || [])[patIdx] ?? 0;
@@ -1098,9 +1112,18 @@ function geneDir(gene, patIdx) {{
     return Math.sign(sz) * Math.sign(rho);
 }}
 
+// Term direction: sign(mean z-score across hidden dims) × sign(pop p_rho)
+// Mean z is a signed summary of the multi-dimensional embedding deviation.
+function termDir(term, patIdx) {{
+    const mz  = (termMZ[term]      || [])[patIdx] ?? 0;
+    const rho = popTermPrho[term]  ?? 0;
+    if (Math.abs(mz) < 0.2 || Math.abs(rho) < 0.1) return 0;
+    return Math.sign(mz) * Math.sign(rho);
+}}
+
 function dirLabel(dir) {{
-    if (dir > 0) return '<span class="dir-up" title="Gene activation in this patient is associated with higher predicted score">↑ higher</span>';
-    if (dir < 0) return '<span class="dir-dn" title="Gene activation in this patient is associated with lower predicted score">↓ lower</span>';
+    if (dir > 0) return '<span class="dir-up" title="Deviation in this patient is associated with higher predicted score">↑ higher</span>';
+    if (dir < 0) return '<span class="dir-dn" title="Deviation in this patient is associated with lower predicted score">↓ lower</span>';
     return '<span style="color:#444">—</span>';
 }}
 
@@ -1134,7 +1157,11 @@ function buildInterp(patIdx) {{
             extra = `, pop-RLIPP=${{top.popR.toFixed(2)}}`;
             if (top.popR > 1.2) extra += ' <span style="color:#f5a623">✓ cohort-validated</span>';
         }}
-        sysStr = `Top system: <strong>${{top.id}}</strong> (imp=${{top.imp.toFixed(2)}}${{extra}})`;
+        const tDir = termDir(top.id, patIdx);
+        const tDirSpan = tDir !== 0 ? ' → ' + (tDir > 0
+            ? `<span class="dir-up">↑ higher</span>`
+            : `<span class="dir-dn">↓ lower</span>`) + ` ${{labelName}}` : '';
+        sysStr = `Top system: <strong>${{top.id}}</strong> (imp=${{top.imp.toFixed(2)}}${{extra}})${{tDirSpan}}`;
     }}
 
     // 3. Top gene with a clear directional signal
@@ -1197,8 +1224,10 @@ function render(patIdx) {{
             ? `<span class="${{rlippClass(s.ptR)}}">${{s.ptR.toFixed(3)}}</span>` : '—';
         const ppS = s.popR !== null
             ? `<span class="${{rlippClass(s.popR)}}">${{s.popR.toFixed(3)}}</span>` : '—';
+        const dir = termDir(s.id, patIdx);
         return `<tr><td>${{s.id}}</td><td>${{s.imp.toFixed(4)}}</td>
             <td>${{ptS}}</td><td>${{ppS}}</td>
+            <td>${{dirLabel(dir)}}</td>
             <td><span class="bar" style="width:${{w}}px;background:#3a6ea8"></span></td></tr>`;
     }}).join('');
 
@@ -1308,10 +1337,10 @@ def main():
     patient_calc = PatientScoreCalculator(args)
     patient_result = patient_calc.compute_scores()
     if patient_result is not None:
-        term_imp, patient_rlipp_scores, gene_imp, gene_signed_z, cell_ids_used = patient_result
+        term_imp, patient_rlipp_scores, gene_imp, gene_signed_z, term_mean_z, cell_ids_used = patient_result
         patient_html = outdir / 'patient_viz.html'
         build_patient_viz(
-            term_imp, patient_rlipp_scores, gene_imp, gene_signed_z, cell_ids_used,
+            term_imp, patient_rlipp_scores, gene_imp, gene_signed_z, term_mean_z, cell_ids_used,
             patient_calc.predicted_vals, rlipp_df, gene_df, patient_html,
             study_id=cbio_study_id,
             task=args.task,

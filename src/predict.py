@@ -136,7 +136,8 @@ parser.add_argument('-task', help = 'Task type: continuous or binary', type = st
 parser.add_argument('-label', help = 'Label column to use from test data', type = str, default = None)
 parser.add_argument('-zscore_method', help='zscore method (zscore/robustz)', type=str)
 parser.add_argument('-std', help = 'Standardization File', type = str)
-parser.add_argument('-mlflow', help = 'Enable MLflow experiment tracking', action = 'store_true')
+parser.add_argument('-mlflow',    help = 'Enable MLflow tracking (default: on; kept for backward compat)', action = 'store_true', default = True)
+parser.add_argument('-no_mlflow', help = 'Disable MLflow experiment tracking', action = 'store_true', default = False)
 
 opt = parser.parse_args()
 torch.set_printoptions(precision=5)
@@ -160,4 +161,4 @@ num_genes = len(gene2id_mapping)
 
 CUDA_ID = opt.cuda
 
-predict(predict_data, num_genes, opt.load, opt.hidden, opt.batchsize, opt.result, cell_features, opt.task, mlflow_enabled=opt.mlflow, label=opt.label)
+predict(predict_data, num_genes, opt.load, opt.hidden, opt.batchsize, opt.result, cell_features, opt.task, mlflow_enabled=not opt.no_mlflow, label=opt.label)

@@ -9,6 +9,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    import questionary
+    _Q = True
+except ImportError:
+    _Q = False
+
 DATA_DIR = Path("data")
 SRC_DIR = Path("src")
 SCRIPTS_DIR = Path(__file__).parent
@@ -138,6 +144,11 @@ def _select(prompt: str, options: list[str]) -> str:
     if not options:
         print(f"\nNo options available: {prompt}")
         sys.exit(1)
+    if _Q:
+        result = questionary.select(prompt, choices=options).ask()
+        if result is None:
+            sys.exit(0)
+        return result
     print(f"\n{prompt}")
     for i, opt in enumerate(options):
         print(f"  [{i}] {opt}")
@@ -154,9 +165,28 @@ def _select(prompt: str, options: list[str]) -> str:
 
 def _param(name: str, default, hint: str = "") -> str:
     """Prompt for one parameter; press Enter to keep the default."""
+    if _Q:
+        suffix = f" ({hint})" if hint else ""
+        result = questionary.text(f"{name}{suffix}:", default=str(default)).ask()
+        if result is None:
+            sys.exit(0)
+        return result or str(default)
     suffix = f"  ({hint})" if hint else ""
     raw = input(f"  {name} [{default}]{suffix}: ").strip()
     return raw if raw else str(default)
+
+
+def _confirm(prompt: str, default: bool = False) -> bool:
+    """Yes/no prompt."""
+    if _Q:
+        result = questionary.confirm(prompt, default=default).ask()
+        if result is None:
+            sys.exit(0)
+        return result
+    raw = input(f"{prompt} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
+    if not raw:
+        return default
+    return raw == "y"
 
 
 def _infer_task(label: str) -> str:
@@ -215,7 +245,7 @@ def run_train():
     batchsize  = _param("batchsize",        "512")
     lr         = _param("lr",               "0.0001",     "learning rate")
     optimize   = _param("optimize",         "1",          "1=direct  2=Optuna search")
-    use_mlflow = _param("mlflow",           "0",          "Enable MLflow tracking (1/0)")
+    use_mlflow = _confirm("Enable MLflow tracking?", default=True)
 
     mdir.mkdir(parents=True, exist_ok=True)
 
@@ -240,7 +270,7 @@ def run_train():
         "-optimize",          optimize,
         "-zscore_method",     "auc",
     ]
-    if use_mlflow.strip() == "1":
+    if use_mlflow:
         cmd += ["-mlflow"]
     fusion_file = ndir / "cell2fusion.txt"
     if fusion_file.exists():
@@ -274,7 +304,7 @@ def run_predict():
     print(f"  task:       {task}  (from {task_source})")
     cuda       = _param("cuda",      "0",          "GPU index")
     batchsize  = _param("batchsize", "64")
-    use_mlflow = _param("mlflow",    "0",          "Enable MLflow tracking (1/0)")
+    use_mlflow = _confirm("Enable MLflow tracking?", default=True)
 
     (metrdir / "hidden").mkdir(parents=True, exist_ok=True)
 
@@ -296,7 +326,7 @@ def run_predict():
         "-zscore_method",     "auc",
         "-batchsize",         batchsize,
     ]
-    if use_mlflow.strip() == "1":
+    if use_mlflow:
         cmd += ["-mlflow"]
     fusion_file = ndir / "cell2fusion.txt"
     if fusion_file.exists():
@@ -333,7 +363,7 @@ def run_predict_annotate():
     cuda       = _param("cuda",      "0",          "GPU index")
     batchsize  = _param("batchsize", "64")
     cpu_count  = _param("cpu_count", "4",          "parallel CPUs for RLIPP scoring")
-    use_mlflow = _param("mlflow",    "0",          "Enable MLflow tracking (1/0)")
+    use_mlflow = _confirm("Enable MLflow tracking?", default=True)
 
     (metrdir / "hidden").mkdir(parents=True, exist_ok=True)
 
@@ -355,7 +385,7 @@ def run_predict_annotate():
         "-zscore_method",     "auc",
         "-batchsize",         batchsize,
     ]
-    mlflow_flag = use_mlflow.strip() == "1"
+    mlflow_flag = use_mlflow
     if mlflow_flag:
         predict_cmd += ["-mlflow"]
     fusion_file = ndir / "cell2fusion.txt"
@@ -418,11 +448,16 @@ def run_annotate():
 
 def run_download():
     """Download genomic + clinical data for a cBioPortal study."""
-    print("\nEnter a cBioPortal study ID (e.g. laml_tcga_pub, breast_msk_2025):")
-    study_id = input("  study_id: ").strip()
-    if not study_id:
-        print("No study ID entered.")
-        return
+    if _Q:
+        study_id = questionary.text("cBioPortal study ID (e.g. laml_tcga_pub, breast_msk_2025):").ask()
+        if not study_id:
+            return
+    else:
+        print("\nEnter a cBioPortal study ID (e.g. laml_tcga_pub, breast_msk_2025):")
+        study_id = input("  study_id: ").strip()
+        if not study_id:
+            print("No study ID entered.")
+            return
 
     _header("Downloading from cBioPortal", Study=study_id,
             Output=str(DATA_DIR / "output" / study_id / "cbioportal_output"))
@@ -457,8 +492,7 @@ def run_download_sample():
     if existing:
         print(f"\nSample data already present in {output_dir}/")
         print(f"  {len(existing)}/{len(_SAMPLE_FILES)} files found.")
-        raw = input("  Re-download? [y/N]: ").strip().lower()
-        if raw != "y":
+        if not _confirm("Re-download?"):
             _sample_usage(output_dir)
             return
 
@@ -505,8 +539,7 @@ For prediction on the held-out test set, the test_data.txt file
 has been saved alongside training_data.txt. Use predict.py with
   -predict data/output/{_SAMPLE_STUDY_ID}/nest_vnn_input/test_data.txt
 """)
-    raw = input("Launch training now? [y/N]: ").strip().lower()
-    if raw == "y":
+    if _confirm("Launch training now?"):
         run_train()
 
 

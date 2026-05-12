@@ -57,19 +57,19 @@ Interactive: select clinical endpoints (binary or continuous), choose a frequenc
 **3. Train**
 
 ```bash
-bash scripts/train.sh <study_id> <label> <task> [cuda_id] [mlflow]
-# e.g. bash scripts/train.sh breast_msk_2025 binary_os_status binary 0 mlflow
+bash scripts/train.sh <study_id> <label> <task> [cuda_id] [no_mlflow]
+# e.g. bash scripts/train.sh breast_msk_2025 binary_os_status binary 0 no_mlflow
 ```
 
 - `task`: `binary` for classification, `continuous` for regression
-- `mlflow` (optional fifth argument): enable MLflow experiment tracking under the `nest_vnn` experiment
+- MLflow experiment tracking is **enabled by default** under the `nest_vnn` experiment. Pass `no_mlflow` as the optional fifth argument to disable it.
 
 Saves best model (by validation loss) to `data/output/<study_id>/<label>/model/model_final.pt`.
 
 **4. Predict + Annotate**
 
 ```bash
-bash scripts/predict.sh  <study_id> <label> <task> [cuda_id] [mlflow]
+bash scripts/predict.sh  <study_id> <label> <task> [cuda_id] [no_mlflow]
 bash scripts/annotate.sh <study_id> <label> <task> [cpu_count]
 ```
 
@@ -108,6 +108,7 @@ Downloads the original GDSC drug-response dataset (1,244 cell lines, 718 genes, 
 | `<label>/annotation/patient_rlipp.txt` | Per-patient RLIPP scores (samples × terms) |
 | `<label>/annotation/patient_gene_importance.txt` | Per-patient gene importance — absolute z-score of hidden embedding (samples × genes) |
 | `<label>/annotation/patient_gene_signed_z.txt` | Per-patient signed gene z-scores — direction of deviation from population mean (samples × genes) |
+| `<label>/annotation/patient_term_mean_z.txt` | Per-patient signed mean z-score across hidden dims per system — used for system direction indicator (samples × terms) |
 | `<label>/annotation/patient_viz.html` | Interactive per-patient explainability viewer |
 
 ---
@@ -171,6 +172,7 @@ Open in any browser. Select a patient by ID to see:
 - **Importance**: L2 norm of the z-scored hidden embedding — how far this patient's system activation deviates from the population mean. Z-scoring is necessary because BatchNorm makes raw activation magnitudes nearly identical across patients.
 - **Pt-RLIPP**: patient-specific RLIPP — deviation²(this system) / Σ deviation²(child systems). Values > 1 mean the system's anomaly is larger than what its children explain.
 - **Pop-RLIPP**: cross-cohort RLIPP from `rlipp_scores.txt`.
+- **Outcome Dir**: direction indicator derived as `sign(mean z-score across hidden dims) × sign(pop p_rho)`. Uses the same ↑ higher / ↓ lower convention as the gene panel. **This is a heuristic**: the mean z is a simplified signed summary of a multi-dimensional embedding; a more principled approach would project onto the Ridge+PCA regression direction. Shown only when |mean z| ≥ 0.2 and |p_rho| ≥ 0.1.
 
 **Genes panel**: top 100 genes by patient importance, with:
 - **Importance**: |z-score| of the gene's scalar hidden embedding.
@@ -242,4 +244,4 @@ Each gene's multi-omic data (mutation, copy number deletion, copy number amplifi
 | `-lr` | `0.0001` | AdamW learning rate |
 | `-zscore_method` | `auc` | `auc` = no normalization (use for AUC/binary), `zscore` or `robustz` for continuous labels |
 | `-cuda` | `0` | GPU index |
-| `-mlflow` | off | Enable MLflow tracking; logs params, per-epoch `train_loss`/`val_loss`/metric/grad_norm, and running best-epoch snapshots (`best_val_loss`, `best_train_loss`, `best_val_<metric>`, `best_train_<metric>`, `best_epoch`), model artifact, and architecture image |
+| `-no_mlflow` | off | Disable MLflow tracking (on by default); logs params, per-epoch `train_loss`/`val_loss`/metric/grad_norm, running best-epoch snapshots (`best_val_loss`, `best_train_loss`, `best_val_<metric>`, `best_train_<metric>`, `best_epoch`), model artifact, architecture image, and confusion matrices (binary tasks) |

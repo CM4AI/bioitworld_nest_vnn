@@ -13,3 +13,4 @@ matplotlib
 requests
 ndex2
 mlflow
+questionary
