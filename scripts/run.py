@@ -590,4 +590,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        import subprocess, sys
+        subprocess.run(["stty", "sane"], check=False)
+        sys.exit(0)

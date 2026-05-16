@@ -660,16 +660,6 @@ class VNNTrainer():
 					metrics["best_epoch"] = best_epoch
 				mlflow.log_metrics(metrics, step=epoch)
 
-		if mlflow_enabled and best_epoch is not None:
-			import mlflow
-			mlflow.log_metrics({
-				f"model_val_{metric_name}":   best_val_metric,
-				f"model_train_{metric_name}": best_train_metric,
-				"model_val_loss":             best_val_loss,
-				"model_train_loss":           best_train_loss,
-				"model_epoch":                float(best_epoch),
-			})
-
 		if mlflow_enabled:
 			import mlflow
 			import matplotlib
@@ -746,7 +736,7 @@ class VNNTrainer():
 					signature = mlflow.models.infer_signature(sig_input.numpy(), sig_out)
 
 					mlflow.pytorch.log_model(best_model.cpu(), name="model",
-					                         signature=signature)
+					                         signature=signature, step=best_epoch)
 				except Exception as e:
 					print(f"Warning: mlflow.pytorch.log_model failed ({e}); "
 					      f"falling back to log_artifact.")

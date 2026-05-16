@@ -314,31 +314,29 @@ def compute_altered_genes(mut_df: pd.DataFrame, cnv_df: pd.DataFrame,
     """Return gene symbols altered in >= min_freq fraction of samples (any data type)."""
     sample_set = set(sample_ids)
     threshold = min_freq * len(sample_ids)
-    gene_samples: dict[str, set] = {}
-
-    def record(gene: str, sample: str):
-        if gene and sample in sample_set:
-            gene_samples.setdefault(gene, set()).add(sample)
-
     gene_col_candidates = ["gene.hugoGeneSymbol", "hugoGeneSymbol"]
+
+    pairs: list[pd.DataFrame] = []   # accumulate (gene, sample) frames
 
     if not mut_df.empty:
         gc = next((c for c in gene_col_candidates if c in mut_df.columns), None)
-        if gc:
-            for _, row in mut_df.iterrows():
-                record(str(row.get(gc, "") or "").strip(), str(row.get("sampleId", "")))
+        if gc and "sampleId" in mut_df.columns:
+            df = mut_df[[gc, "sampleId"]].rename(columns={gc: "gene", "sampleId": "sample"})
+            df["gene"] = df["gene"].astype(str).str.strip()
+            df["sample"] = df["sample"].astype(str)
+            pairs.append(df[df["sample"].isin(sample_set) & df["gene"].ne("") & df["gene"].ne("nan")])
 
     if not cnv_df.empty:
         gc = next((c for c in gene_col_candidates if c in cnv_df.columns), None)
         vc = next((c for c in ["alteration", "value"] if c in cnv_df.columns), None)
-        if gc and vc:
-            for _, row in cnv_df.iterrows():
-                try:
-                    v = int(float(row.get(vc, 0)))
-                except (ValueError, TypeError):
-                    continue
-                if v <= CNV_DEEP_DELETION or v >= CNV_AMPLIFICATION:
-                    record(str(row.get(gc, "") or "").strip(), str(row.get("sampleId", "")))
+        if gc and vc and "sampleId" in cnv_df.columns:
+            df = cnv_df[[gc, "sampleId", vc]].copy()
+            df[vc] = pd.to_numeric(df[vc], errors="coerce")
+            df = df[df[vc].notna() & ((df[vc] <= CNV_DEEP_DELETION) | (df[vc] >= CNV_AMPLIFICATION))]
+            df = df.rename(columns={gc: "gene", "sampleId": "sample"})[["gene", "sample"]]
+            df["gene"] = df["gene"].astype(str).str.strip()
+            df["sample"] = df["sample"].astype(str)
+            pairs.append(df[df["sample"].isin(sample_set) & df["gene"].ne("") & df["gene"].ne("nan")])
 
     if not fusions_df.empty:
         sv_cols = [c for c in ["site1HugoSymbol", "site2HugoSymbol",
@@ -347,12 +345,23 @@ def compute_altered_genes(mut_df: pd.DataFrame, cnv_df: pd.DataFrame,
                    if c in fusions_df.columns]
         if not sv_cols:
             sv_cols = [c for c in gene_col_candidates if c in fusions_df.columns]
-        for _, row in fusions_df.iterrows():
-            s = str(row.get("sampleId", ""))
-            for col in sv_cols:
-                record(str(row.get(col, "") or "").strip(), s)
+        if sv_cols and "sampleId" in fusions_df.columns:
+            df = fusions_df[["sampleId"] + sv_cols].copy()
+            df["sampleId"] = df["sampleId"].astype(str)
+            df = df[df["sampleId"].isin(sample_set)]
+            melted = (df.melt(id_vars="sampleId", value_vars=sv_cols, value_name="gene")
+                        .rename(columns={"sampleId": "sample"})[["gene", "sample"]])
+            melted["gene"] = melted["gene"].astype(str).str.strip()
+            pairs.append(melted[melted["gene"].ne("") & melted["gene"].ne("nan")])
 
-    return {g for g, samples in gene_samples.items() if g and len(samples) >= threshold}
+    if not pairs:
+        return set()
+
+    counts = (pd.concat(pairs, ignore_index=True)
+                .drop_duplicates()
+                .groupby("gene")["sample"]
+                .nunique())
+    return set(counts[counts >= threshold].index)
 
 
 def build_ontology_from_ndex(uuid: str, gene_set: set) -> tuple[dict, list]:
