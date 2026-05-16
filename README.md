@@ -2,7 +2,7 @@
 
 NeST-VNN is an interpretable neural network that predicts cancer patient clinical outcomes (survival, recurrence, drug response) from tumor genotype. Its structure mirrors a hierarchical biological ontology — each node in the hierarchy becomes a group of PyTorch modules — making predictions explainable at the level of biological systems rather than individual genes.
 
-Each patient/sample is characterized by binary feature vectors for somatic mutations, copy number deletions, copy number amplifications, and (optionally) gene fusions across genes from clinical panels such as Foundation Medicine (n=718).
+Each patient/sample is characterized by binary feature vectors for somatic mutations, copy number deletions, copy number amplifications, and (optionally) gene fusions for a selected gene set/panel that overlaps with a cell map.
 
 **Related publications (please cite both if you use this repo):**
 1. Park, S., Silva, E., Singhal, A. et al. *A deep learning model of tumor cell architecture elucidates response and resistance to CDK4/6 inhibitors.* Nat Cancer (2024). https://doi.org/10.1038/s43018-024-00740-1
@@ -12,7 +12,7 @@ Each patient/sample is characterized by binary feature vectors for somatic mutat
 
 ## Environment setup
 
-Requires CUDA 13.0 and a compatible GPU.
+A CUDA-capable GPU is recommended. CPU-only training and inference is also supported (pass `-cuda cpu` or select `cpu` when prompted).
 
 ```bash
 conda env create -f conda-envs/environment.yml
@@ -52,7 +52,7 @@ Downloads mutations, copy number, fusion, and clinical data into `data/output/<s
 python scripts/cbioport_transform.py <study_id>
 ```
 
-Interactive: select clinical endpoints (binary or continuous), choose a frequency threshold for the gene panel, and optionally load a custom gene list and ontology from an NDEx network. Writes all input files to `data/output/<study_id>/nest_vnn_input/`. Also writes `metadata.json` recording the cBioPortal study URL and NDEx network used.
+Interactive: select clinical endpoints (binary or continuous), choose a frequency threshold for the gene panel, and optionally load a custom gene list and ontology from an NDEx network. When using NDEx, assemblies with fewer than the minimum number of panel genes (default: 5, matching the NeST-VNN paper) are pruned and their genes rolled up to the nearest surviving ancestor. Writes all input files to `data/output/<study_id>/nest_vnn_input/`. Also writes `metadata.json` recording the cBioPortal study URL and NDEx network used.
 
 **3. Train**
 
@@ -296,6 +296,6 @@ Each gene's multi-omic data (mutation, copy number deletion, copy number amplifi
 | `-dropout_fraction` | `0.3` | Dropout fraction applied to term layers |
 | `-min_dropout_layer` | `2` | First ontology layer (from leaves) to apply dropout |
 | `-zscore_method` | `auc` | **Training only.** `auc` = no normalization, `zscore` or `robustz` for continuous labels; normalization parameters saved to `std.txt` and applied at predict time |
-| `-cuda` | `0` | GPU index |
+| `-cuda` | `0` | GPU index, or `cpu` for CPU-only |
 | `-seed` | — | Random seed for reproducible train/val split |
 | `-no_mlflow` | off | Disable MLflow tracking (on by default); logs params, per-epoch `train_loss`/`val_loss`/metric/grad_norm, running best-epoch snapshots (`best_val_loss` etc.), step-less `model_val_loss`/`model_train_loss`/`model_val_<metric>`/`model_train_<metric>`/`model_epoch` summary metrics tied to the saved model, confusion matrix counts and images (binary tasks), and model artifact with input/output signature |
