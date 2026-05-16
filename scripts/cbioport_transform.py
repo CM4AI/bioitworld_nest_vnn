@@ -513,11 +513,13 @@ def interactive_ontology_selection(
     ndex_uuid_arg: str | None,
     min_freq_arg: float | None,
     gene_list_arg: str | None,
+    min_genes_arg: int | None = None,
 ) -> tuple[dict, list, dict] | None:
     """
     Ask the user how to select the gene panel and ontology hierarchy.
     Returns (gene2ind, ontology_rows, selection_metadata) for custom, or None to use default files.
-    selection_metadata keys: ndex_uuid, min_alt_freq (float|None), gene_list_file (str|None), gene_count
+    selection_metadata keys: ndex_uuid, min_alt_freq (float|None), gene_list_file (str|None),
+                             gene_count, min_genes (int)
     """
     print("\n" + "=" * 60)
     print("GENE PANEL & HIERARCHY SELECTION")
@@ -593,12 +595,25 @@ def interactive_ontology_selection(
             gene_set = compute_altered_genes(mut_df, cnv_df, fusions_df, sample_ids, min_freq)
             print(f"  → {len(gene_set)} genes at >= {min_freq*100:.1f}%")
 
-    gene2ind, ontology_rows = build_ontology_from_ndex(uuid, gene_set)
+    if min_genes_arg is not None:
+        min_genes = min_genes_arg
+    else:
+        raw_mg = input(
+            f"\n  Minimum panel genes per assembly [default: 5, per NeST-VNN paper]: "
+        ).strip()
+        try:
+            min_genes = int(raw_mg) if raw_mg else 5
+        except ValueError:
+            min_genes = 5
+    print(f"  → minimum genes per assembly: {min_genes}")
+
+    gene2ind, ontology_rows = build_ontology_from_ndex(uuid, gene_set, min_genes=min_genes)
     selection_metadata = {
         "ndex_uuid":     uuid,
         "min_alt_freq":  min_freq_used,
         "gene_list_file": gene_list_file,
         "gene_count":    len(gene2ind),
+        "min_genes":     min_genes,
     }
     return gene2ind, ontology_rows, selection_metadata
 
@@ -883,6 +898,8 @@ def write_readme(output_dir, sample_ids, gene2ind, endpoints,
             w(f"- **cBioPortal study:** [{metadata['study_id']}]({metadata['cbioportal_url']})")
         if "ndex_uuid" in metadata:
             w(f"- **Ontology (NDEx):** [{metadata['ndex_uuid']}]({metadata['ndex_url']})")
+            w(f"- **Min genes per assembly:** {metadata.get('min_genes', 5)} "
+              f"(paper default: 5)")
             if metadata.get("min_alt_freq") is not None:
                 w(f"- **Gene selection:** frequency-filtered — genes altered in "
                   f"≥ {metadata['min_alt_freq']*100:.1f}% of {n_s} samples "
@@ -970,6 +987,8 @@ def main():
     parser.add_argument("--ndex-uuid", help=f"NDEx hierarchy UUID (skips interactive prompt; default NeST: {DEFAULT_NDEX_UUID})", default=None)
     parser.add_argument("--min-alt-freq", type=float, help="Min alteration frequency 0–1 for gene selection with --ndex-uuid (default 0.01)", default=None)
     parser.add_argument("--gene-list", help="Path to gene list file (one symbol per line) for use with --ndex-uuid", default=None)
+    parser.add_argument("--min-genes", type=int, default=None,
+                        help="Minimum panel genes per assembly when building from NDEx (default: 5, per NeST-VNN paper)")
     args = parser.parse_args()
 
     study_id = args.study_id
@@ -1025,6 +1044,7 @@ def main():
         ndex_uuid_arg=args.ndex_uuid,
         min_freq_arg=args.min_alt_freq,
         gene_list_arg=args.gene_list,
+        min_genes_arg=args.min_genes,
     )
 
     ndex_metadata: dict | None = None
