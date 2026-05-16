@@ -196,7 +196,7 @@ def load_train_data(train_file, cell2id, zscore_method, std_file, label_col=None
 	return train_features, val_features, train_labels, val_labels
 
 
-def load_pred_data(test_file, cell2id, zscore_method, train_std_file, label_col=None, task='continuous'):
+def load_pred_data(test_file, cell2id, train_std_file, label_col=None, task='continuous'):
 
 	train_std_df = pd.read_csv(train_std_file, sep='\t', header=None, names=['dataset', 'center', 'scale'])
 
@@ -250,9 +250,9 @@ def prepare_train_data(train_file, cell2id_mapping, zscore_method, std_file, lab
 	return (torch.Tensor(train_features), torch.FloatTensor(train_labels), torch.Tensor(val_features), torch.FloatTensor(val_labels))
 
 
-def prepare_predict_data(test_file, cell2id_mapping_file, zscore_method, std_file, label_col=None, task='continuous'):
+def prepare_predict_data(test_file, cell2id_mapping_file, std_file, label_col=None, task='continuous'):
 	cell2id_mapping = load_mapping(cell2id_mapping_file, 'cell lines')
-	test_features, test_labels = load_pred_data(test_file, cell2id_mapping, zscore_method, std_file, label_col, task)
+	test_features, test_labels = load_pred_data(test_file, cell2id_mapping, std_file, label_col, task)
 	return (torch.Tensor(test_features), torch.Tensor(test_labels)), cell2id_mapping
 
 

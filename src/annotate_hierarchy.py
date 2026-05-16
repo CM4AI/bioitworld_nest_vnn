@@ -85,10 +85,23 @@ class ClinicalRLIPPCalculator:
         self._load_test_labels(args)
 
         self.hidden_dir = args.hidden.rstrip('/') + '/'
-        self.num_hiddens_genotype = args.genotype_hiddens
+        self.num_hiddens_genotype = args.genotype_hiddens or self._detect_hiddens(self.hidden_dir, self.terms)
         self.cpu_count = args.cpu_count
         self.outdir = Path(args.outdir)
         self.outdir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _detect_hiddens(hidden_dir: str, terms: list, fallback: int = 4) -> int:
+        """Infer genotype_hiddens from the column count of the first readable term hidden file."""
+        for term in terms:
+            path = hidden_dir + term + '.hidden'
+            if os.path.exists(path):
+                try:
+                    row = np.loadtxt(path, max_rows=1)
+                    return int(row.size)
+                except Exception:
+                    continue
+        return fallback
 
     def _load_test_labels(self, args):
         """Load test labels, handling both legacy and new header formats."""
@@ -1076,7 +1089,7 @@ class PatientScoreCalculator:
 
     def __init__(self, args):
         self.hidden_dir = Path(args.hidden)
-        self.num_hiddens_genotype = args.genotype_hiddens
+        self.num_hiddens_genotype = args.genotype_hiddens or self._detect_hiddens(self.hidden_dir)
         self.outdir = Path(args.outdir)
 
         ont = pd.read_csv(
@@ -1107,6 +1120,19 @@ class PatientScoreCalculator:
         for _, row in ont.iterrows():
             if row['relation'] != 'gene':
                 self.ont_children.setdefault(row['parent'], []).append(row['child'])
+
+    @staticmethod
+    def _detect_hiddens(hidden_dir: Path, fallback: int = 4) -> int:
+        """Infer genotype_hiddens from the column count of the first readable term hidden file."""
+        for path in hidden_dir.glob('*.hidden'):
+            try:
+                row = np.loadtxt(path, max_rows=1)
+                ncols = int(row.size)
+                if ncols > 1:   # gene hiddens are 1-column; skip them
+                    return ncols
+            except Exception:
+                continue
+        return fallback
 
     def _load_cell_ids(self, args) -> list[str]:
         test_path = Path(args.test)
@@ -1613,7 +1639,7 @@ def main():
     parser.add_argument('-label', default=None, help='Label column (for new-format test files)')
     parser.add_argument('-task', default='continuous', choices=['continuous', 'binary'])
     parser.add_argument('-cpu_count', type=int, default=1, help='CPU cores for parallel computation')
-    parser.add_argument('-genotype_hiddens', type=int, default=4, help='Hidden dim per term')
+    parser.add_argument('-genotype_hiddens', type=int, default=None, help='Hidden dim per term (auto-detected from hidden files if omitted)')
     parser.add_argument('-mlflow', action='store_true', help='Log annotation artifacts to predict MLflow run')
 
     args = parser.parse_args()

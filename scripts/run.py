@@ -189,6 +189,22 @@ def _confirm(prompt: str, default: bool = False) -> bool:
     return raw == "y"
 
 
+def _select_zscore(default: str = "auc") -> str:
+    choices = ["auc", "zscore", "robustz"]
+    if _Q:
+        result = questionary.select(
+            "zscore_method (auc = no normalization):",
+            choices=choices,
+            default=default,
+        ).ask()
+        if result is None:
+            sys.exit(0)
+        return result
+    print(f"  zscore_method [{default}]  (auc/zscore/robustz): ", end="")
+    raw = input().strip()
+    return raw if raw in choices else default
+
+
 def _infer_task(label: str) -> str:
     return "binary" if "binary" in label.lower() else "continuous"
 
@@ -240,11 +256,22 @@ def run_train():
 
     print("\nParameters (press Enter to keep default):")
     print(f"  task:       {task}  (from {task_source})")
-    cuda       = _param("cuda",             "0",          "GPU index")
-    epochs     = _param("epoch",            "200")
-    batchsize  = _param("batchsize",        "512")
-    lr         = _param("lr",               "0.0001",     "learning rate")
-    optimize   = _param("optimize",         "1",          "1=direct  2=Optuna search")
+    cuda             = _param("cuda",             "0",      "GPU index")
+    epochs           = _param("epoch",            "200")
+    batchsize        = _param("batchsize",         "512")
+    lr               = _param("lr",               "0.001", "learning rate")
+    optimize         = _param("optimize",          "1",      "1=direct  2=Optuna search")
+    genotype_hiddens = _param("genotype_hiddens",  "4",      "hidden units per ontology term")
+    zscore_method    = _select_zscore("auc")
+
+    print("\nAdvanced parameters (press Enter to keep default):")
+    wd               = _param("wd",               "0.001",  "weight decay")
+    alpha            = _param("alpha",             "0.3",    "auxiliary loss weight")
+    patience         = _param("patience",          "30",     "early stopping patience (epochs)")
+    dropout_fraction  = _param("dropout_fraction",  "0.3",    "dropout fraction")
+    min_dropout_layer = _param("min_dropout_layer", "2",      "first ontology layer to apply dropout")
+    seed_raw          = _param("seed",              "",       "random seed (leave blank for none)")
+
     use_mlflow = _confirm("Enable MLflow tracking?", default=True)
 
     mdir.mkdir(parents=True, exist_ok=True)
@@ -262,14 +289,21 @@ def run_train():
         "-task",              task,
         "-std",               str(mdir / "std.txt"),
         "-model",             str(mdir),
-        "-genotype_hiddens",  "4",
+        "-genotype_hiddens",  genotype_hiddens,
         "-lr",                lr,
+        "-wd",                wd,
+        "-alpha",             alpha,
         "-cuda",              cuda,
         "-epoch",             epochs,
         "-batchsize",         batchsize,
         "-optimize",          optimize,
-        "-zscore_method",     "auc",
+        "-zscore_method",     zscore_method,
+        "-patience",          patience,
+        "-dropout_fraction",  dropout_fraction,
+        "-min_dropout_layer", min_dropout_layer,
     ]
+    if seed_raw.strip():
+        cmd += ["-seed", seed_raw.strip()]
     if use_mlflow:
         cmd += ["-mlflow"]
     fusion_file = ndir / "cell2fusion.txt"
@@ -302,7 +336,7 @@ def run_predict():
 
     print("\nParameters (press Enter to keep default):")
     print(f"  task:       {task}  (from {task_source})")
-    cuda       = _param("cuda",      "0",          "GPU index")
+    cuda       = _param("cuda",      "0",  "GPU index")
     batchsize  = _param("batchsize", "64")
     use_mlflow = _confirm("Enable MLflow tracking?", default=True)
 
@@ -323,7 +357,6 @@ def run_predict():
         "-hidden",            str(metrdir / "hidden"),
         "-result",            str(metrdir / "predict"),
         "-cuda",              cuda,
-        "-zscore_method",     "auc",
         "-batchsize",         batchsize,
     ]
     if use_mlflow:
@@ -360,9 +393,9 @@ def run_predict_annotate():
 
     print("\nParameters (press Enter to keep default):")
     print(f"  task:       {task}  (from {task_source})")
-    cuda       = _param("cuda",      "0",          "GPU index")
+    cuda       = _param("cuda",      "0",  "GPU index")
     batchsize  = _param("batchsize", "64")
-    cpu_count  = _param("cpu_count", "4",          "parallel CPUs for RLIPP scoring")
+    cpu_count  = _param("cpu_count", "4",  "parallel CPUs for RLIPP scoring")
     use_mlflow = _confirm("Enable MLflow tracking?", default=True)
 
     (metrdir / "hidden").mkdir(parents=True, exist_ok=True)
@@ -382,11 +415,9 @@ def run_predict_annotate():
         "-hidden",            str(metrdir / "hidden"),
         "-result",            str(metrdir / "predict"),
         "-cuda",              cuda,
-        "-zscore_method",     "auc",
         "-batchsize",         batchsize,
     ]
-    mlflow_flag = use_mlflow
-    if mlflow_flag:
+    if use_mlflow:
         predict_cmd += ["-mlflow"]
     fusion_file = ndir / "cell2fusion.txt"
     if fusion_file.exists():
@@ -395,12 +426,11 @@ def run_predict_annotate():
     annotate_cmd = [
         sys.executable, str(SRC_DIR / "annotate_hierarchy.py"),
         study_id,
-        "-label",            label,
-        "-task",             task,
-        "-cpu_count",        cpu_count,
-        "-genotype_hiddens", "4",
+        "-label",   label,
+        "-task",    task,
+        "-cpu_count", cpu_count,
     ]
-    if mlflow_flag:
+    if use_mlflow:
         annotate_cmd += ["-mlflow"]
 
     _header("Predict + Annotate NeST-VNN",
@@ -425,18 +455,16 @@ def run_annotate():
     label = _select("Select label (predicted run):", labels)
 
     task, task_source = _resolve_task(study_id, label)
-
     print("\nParameters (press Enter to keep default):")
     print(f"  task:       {task}  (from {task_source})")
-    cpu_count = _param("cpu_count", "4",          "parallel CPUs for RLIPP scoring")
+    cpu_count = _param("cpu_count", "4", "parallel CPUs for RLIPP scoring")
 
     cmd = [
         sys.executable, str(SRC_DIR / "annotate_hierarchy.py"),
         study_id,
-        "-label",            label,
-        "-task",             task,
-        "-cpu_count",        cpu_count,
-        "-genotype_hiddens", "4",
+        "-label",     label,
+        "-task",      task,
+        "-cpu_count", cpu_count,
     ]
 
     _header("Annotating NeST-VNN Hierarchy",

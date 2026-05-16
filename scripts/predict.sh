@@ -45,6 +45,5 @@ python src/predict.py \
     -hidden "${METRICS_DIR}/hidden" \
     -result "${METRICS_DIR}/predict" \
     -cuda "${CUDA_ID}" \
-    -zscore_method auc \
     -batchsize 64 \
     ${MLFLOW_FLAG}

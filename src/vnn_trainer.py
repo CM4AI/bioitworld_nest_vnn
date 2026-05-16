@@ -660,6 +660,16 @@ class VNNTrainer():
 					metrics["best_epoch"] = best_epoch
 				mlflow.log_metrics(metrics, step=epoch)
 
+		if mlflow_enabled and best_epoch is not None:
+			import mlflow
+			mlflow.log_metrics({
+				f"model_val_{metric_name}":   best_val_metric,
+				f"model_train_{metric_name}": best_train_metric,
+				"model_val_loss":             best_val_loss,
+				"model_train_loss":           best_train_loss,
+				"model_epoch":                float(best_epoch),
+			})
+
 		if mlflow_enabled:
 			import mlflow
 			import matplotlib
@@ -700,6 +710,12 @@ class VNNTrainer():
 
 					cm = confusion_matrix(all_labels, all_preds)
 					tn, fp, fn, tp = cm.ravel()
+					mlflow.log_metrics({
+						f"{split_name}_cm_tn": int(tn),
+						f"{split_name}_cm_fp": int(fp),
+						f"{split_name}_cm_fn": int(fn),
+						f"{split_name}_cm_tp": int(tp),
+					})
 
 					disp = ConfusionMatrixDisplay(confusion_matrix=cm)
 					fig, ax = plt.subplots(figsize=(4, 4))

@@ -133,7 +133,6 @@ parser.add_argument('-cn_amplifications', help = 'Copy number amplifications for
 parser.add_argument('-fusions', help = 'Fusion information for cell lines', type = str, default = None)
 parser.add_argument('-task', help = 'Task type: continuous or binary', type = str, default = 'continuous', choices = ['continuous', 'binary'])
 parser.add_argument('-label', help = 'Label column to use from test data', type = str, default = None)
-parser.add_argument('-zscore_method', help='zscore method (zscore/robustz)', type=str)
 parser.add_argument('-std', help = 'Standardization File', type = str)
 parser.add_argument('-mlflow',    help = 'Enable MLflow tracking (default: on; kept for backward compat)', action = 'store_true', default = True)
 parser.add_argument('-no_mlflow', help = 'Disable MLflow experiment tracking', action = 'store_true', default = False)
@@ -141,7 +140,7 @@ parser.add_argument('-no_mlflow', help = 'Disable MLflow experiment tracking', a
 opt = parser.parse_args()
 torch.set_printoptions(precision=5)
 
-predict_data, cell2id_mapping = util.prepare_predict_data(opt.predict, opt.cell2id, opt.zscore_method, opt.std, opt.label, opt.task)
+predict_data, cell2id_mapping = util.prepare_predict_data(opt.predict, opt.cell2id, opt.std, opt.label, opt.task)
 gene2id_mapping = util.load_mapping(opt.gene2id, "genes")
 
 # load cell/drug features

@@ -239,7 +239,7 @@ The network is task-agnostic in structure but differs in how outputs are treated
 | Aspect | Binary (`-task binary`) | Continuous (`-task continuous`) |
 |---|---|---|
 | Main loss | `BCEWithLogitsLoss` (logits in, no sigmoid needed) | `MSELoss` |
-| Label normalization | None (raw 0/1) | Z-scored using training-set mean/std (if `-zscore_method zscore` or `robustz`); parameters saved to `std.txt` and applied at predict time |
+| Label normalization | None (raw 0/1) | Z-scored using training-set statistics (if `-zscore_method zscore` or `robustz`); parameters saved to `std.txt`; predict reads `std.txt` directly (passing `-zscore_method` to predict has no effect) |
 | Inference output | Logits → sigmoid probabilities → thresholded at 0.5 | Raw z-scored predictions (optionally inverted using `std.txt`) |
 | Training metric | Accuracy | Pearson correlation |
 | Auxiliary head loss | `BCEWithLogitsLoss` | `MSELoss` (see below) |
@@ -286,11 +286,16 @@ Each gene's multi-omic data (mutation, copy number deletion, copy number amplifi
 |---|---|---|
 | `-task` | `continuous` | `binary` for classification (BCEWithLogits), `continuous` for regression (MSE) |
 | `-label` | — | Column name in `training_data.txt` to use as the target |
-| `-genotype_hiddens` | `4` | Hidden units per ontology term; must be consistent across train/predict/annotate |
+| `-genotype_hiddens` | `4` | Hidden units per ontology term; passed to train, auto-detected from hidden files at annotation |
 | `-optimize` | `1` | `1` = direct training; `2` = Optuna hyperparameter search then train |
 | `-alpha` | `0.3` | Weight for auxiliary supervision losses on intermediate term outputs |
 | `-epoch` | `200` | Maximum training epochs (early stopping saves best by validation loss) |
-| `-lr` | `0.0001` | AdamW learning rate |
-| `-zscore_method` | `auc` | `auc` = no normalization (use for AUC/binary), `zscore` or `robustz` for continuous labels |
+| `-lr` | `0.001` | AdamW learning rate |
+| `-wd` | `0.001` | AdamW weight decay |
+| `-patience` | `30` | Early stopping patience (epochs without improvement) |
+| `-dropout_fraction` | `0.3` | Dropout fraction applied to term layers |
+| `-min_dropout_layer` | `2` | First ontology layer (from leaves) to apply dropout |
+| `-zscore_method` | `auc` | **Training only.** `auc` = no normalization, `zscore` or `robustz` for continuous labels; normalization parameters saved to `std.txt` and applied at predict time |
 | `-cuda` | `0` | GPU index |
-| `-no_mlflow` | off | Disable MLflow tracking (on by default); logs params, per-epoch `train_loss`/`val_loss`/metric/grad_norm, running best-epoch snapshots (`best_val_loss`, `best_train_loss`, `best_val_<metric>`, `best_train_<metric>`, `best_epoch`), model artifact, architecture image, and confusion matrices (binary tasks) |
+| `-seed` | — | Random seed for reproducible train/val split |
+| `-no_mlflow` | off | Disable MLflow tracking (on by default); logs params, per-epoch `train_loss`/`val_loss`/metric/grad_norm, running best-epoch snapshots (`best_val_loss` etc.), step-less `model_val_loss`/`model_train_loss`/`model_val_<metric>`/`model_train_<metric>`/`model_epoch` summary metrics tied to the saved model, confusion matrix counts and images (binary tasks), and model artifact with input/output signature |
