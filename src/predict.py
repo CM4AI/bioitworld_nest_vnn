@@ -1,4 +1,3 @@
-
 import argparse
 import sys
 import os
@@ -12,11 +11,11 @@ import torch.nn.functional as F
 import util
 
 
-def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, result_file, cell_features):
+def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, result_file, cell_features, task, mlflow_enabled=False, label=None):
 
 	feature_dim = gene_dim
 
-	model = torch.load(model_file, map_location='cuda:%d' % CUDA_ID)
+	model = torch.load(model_file, map_location='cuda:%d' % CUDA_ID, weights_only=False)
 
 	predict_feature, predict_label = predict_data
 
@@ -37,7 +36,7 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 			saved_grads[element] = grad
 		return savegrad_hook
 
-	for i, (inputdata, labels) in enumerate(test_loader):
+	for batch_idx, (inputdata, labels) in enumerate(test_loader):
 		# Convert torch tensor to Variable
 		features = util.build_input_vector(inputdata, cell_features)
 
@@ -51,9 +50,12 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 		else:
 			test_predict = torch.cat([test_predict, aux_out_map['final'].data], dim=0)
 
+		# First batch overwrites; subsequent batches append within the same run.
+		file_mode = 'wb' if batch_idx == 0 else 'ab'
+
 		for element, hidden_map in hidden_embeddings_map.items():
 			hidden_file = hidden_folder + '/' + element + '.hidden'
-			with open(hidden_file, 'ab') as f:
+			with open(hidden_file, file_mode) as f:
 				np.savetxt(f, hidden_map.data.cpu().numpy(), '%.4e')
 
 		for element, _ in hidden_embeddings_map.items():
@@ -63,20 +65,55 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 		aux_out_map['final'].backward(torch.ones_like(aux_out_map['final']))
 
 		# Save Feature Grads
-		feature_grad = torch.zeros(0,0).cuda(CUDA_ID)
-		for i in range(len(cuda_features[0, 0, :])):
-			feature_grad = cuda_features.grad.data[:, :, i]
-			with open(result_file + '_feature_grad_' + str(i) + '.txt', 'ab') as f:
+		for feat_i in range(len(cuda_features[0, 0, :])):
+			feature_grad = cuda_features.grad.data[:, :, feat_i]
+			with open(result_file + '_feature_grad_' + str(feat_i) + '.txt', file_mode) as f:
 				np.savetxt(f, feature_grad.cpu().numpy(), '%.4e', delimiter='\t')
 
 		# Save Hidden Grads
 		for element, hidden_grad in saved_grads.items():
 			hidden_file = hidden_folder + '/' + element + '.hidden_grad'
-			with open(hidden_file, 'ab') as f:
+			with open(hidden_file, file_mode) as f:
 				np.savetxt(f, hidden_grad.data.cpu().numpy(), '%.4e', delimiter='\t')
 
-	test_corr = util.pearson_corr(test_predict, predict_label_gpu)
-	print("Test correlation\t%s\t%.4f" % (model.root, test_corr))
+	if task == 'binary':
+		test_probs = torch.sigmoid(test_predict)
+		test_preds_binary = (test_probs >= 0.5).float()
+		correct = (test_preds_binary.view(-1) == predict_label_gpu.view(-1)).float()
+		acc = correct.sum() / len(correct)
+		print("Test accuracy\t%s\t%.4f" % (model.root, acc))
+		# Save probabilities and binary predictions
+		np.savetxt(result_file + '_probabilities.txt', test_probs.cpu().numpy(), '%.4e')
+		np.savetxt(result_file + '_predictions.txt', test_preds_binary.cpu().numpy(), '%d')
+		metric_value, metric_name = acc.item(), "test_accuracy"
+	else:
+		test_corr = util.pearson_corr(test_predict, predict_label_gpu)
+		print("Test correlation\t%s\t%.4f" % (model.root, test_corr))
+		metric_value, metric_name = float(test_corr), "test_pearson_r"
+
+	if mlflow_enabled:
+		try:
+			import mlflow
+			from pathlib import Path
+			mlflow.set_experiment("nest_vnn")
+			model_path = Path(model_file)
+			study_id = (model_path.parts[model_path.parts.index("output") + 1]
+			            if "output" in model_path.parts else "unknown")
+			# Read training run_id saved by vnn_trainer
+			run_id_path = model_path.parent / "mlflow_run_id.txt"
+			training_run_id = run_id_path.read_text().strip() if run_id_path.exists() else None
+			with mlflow.start_run(parent_run_id=training_run_id or None) as active_run:
+				params = {"study_id": study_id}
+				if label:
+					params["label"] = label
+				mlflow.log_params(params)
+				mlflow.log_metric(metric_name, metric_value)
+
+				# Persist run_id so annotate step can resume this run to log artifacts
+				predict_run_id_path = Path(result_file).parent / "mlflow_run_id.txt"
+				predict_run_id_path.write_text(active_run.info.run_id)
+		except Exception as e:
+			print(f"Warning: MLflow logging failed: {e}")
 
 	np.savetxt(result_file + '.txt', test_predict.cpu().numpy(),'%.4e')
 
@@ -93,24 +130,33 @@ parser.add_argument('-cuda', help='Specify GPU', type=int, default=0)
 parser.add_argument('-mutations', help = 'Mutation information for cell lines', type = str)
 parser.add_argument('-cn_deletions', help = 'Copy number deletions for cell lines', type = str)
 parser.add_argument('-cn_amplifications', help = 'Copy number amplifications for cell lines', type = str)
-parser.add_argument('-zscore_method', help='zscore method (zscore/robustz)', type=str)
+parser.add_argument('-fusions', help = 'Fusion information for cell lines', type = str, default = None)
+parser.add_argument('-task', help = 'Task type: continuous or binary', type = str, default = 'continuous', choices = ['continuous', 'binary'])
+parser.add_argument('-label', help = 'Label column to use from test data', type = str, default = None)
 parser.add_argument('-std', help = 'Standardization File', type = str)
+parser.add_argument('-mlflow',    help = 'Enable MLflow tracking (default: on; kept for backward compat)', action = 'store_true', default = True)
+parser.add_argument('-no_mlflow', help = 'Disable MLflow experiment tracking', action = 'store_true', default = False)
 
 opt = parser.parse_args()
 torch.set_printoptions(precision=5)
 
-predict_data, cell2id_mapping = util.prepare_predict_data(opt.predict, opt.cell2id, opt.zscore_method, opt.std)
+predict_data, cell2id_mapping = util.prepare_predict_data(opt.predict, opt.cell2id, opt.std, opt.label, opt.task)
 gene2id_mapping = util.load_mapping(opt.gene2id, "genes")
 
 # load cell/drug features
 mutations = np.genfromtxt(opt.mutations, delimiter = ',')
 cn_deletions = np.genfromtxt(opt.cn_deletions, delimiter = ',')
 cn_amplifications = np.genfromtxt(opt.cn_amplifications, delimiter = ',')
-cell_features = np.dstack([mutations, cn_deletions, cn_amplifications])
+
+feature_layers = [mutations, cn_deletions, cn_amplifications]
+if opt.fusions is not None:
+	fusions = np.genfromtxt(opt.fusions, delimiter = ',')
+	feature_layers.append(fusions)
+cell_features = np.dstack(feature_layers)
 
 num_cells = len(cell2id_mapping)
 num_genes = len(gene2id_mapping)
 
 CUDA_ID = opt.cuda
 
-predict(predict_data, num_genes, opt.load, opt.hidden, opt.batchsize, opt.result, cell_features)
+predict(predict_data, num_genes, opt.load, opt.hidden, opt.batchsize, opt.result, cell_features, opt.task, mlflow_enabled=not opt.no_mlflow, label=opt.label)

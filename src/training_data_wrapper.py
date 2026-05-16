@@ -1,4 +1,3 @@
-import sys
 import numpy as np
 import networkx as nx
 import networkx.algorithms.components.connected as nxacc
@@ -28,18 +27,31 @@ class TrainingDataWrapper():
 		self.delta = args.delta
 		self.min_dropout_layer = args.min_dropout_layer
 		self.dropout_fraction = args.dropout_fraction
+		self.task = args.task
+		self.label_col = args.label
+		self.mlflow_enabled = not getattr(args, 'no_mlflow', False)
+		self.seed = getattr(args, 'seed', None)
+		self.onto = args.onto
+		self.gene2id = args.gene2id
 		self.load_ontology(args.onto)
 
 		self.mutations = np.genfromtxt(args.mutations, delimiter = ',')
 		self.cn_deletions = np.genfromtxt(args.cn_deletions, delimiter = ',')
 		self.cn_amplifications = np.genfromtxt(args.cn_amplifications, delimiter = ',')
-		self.cell_features = np.dstack([self.mutations, self.cn_deletions, self.cn_amplifications])
+
+		feature_layers = [self.mutations, self.cn_deletions, self.cn_amplifications]
+		if args.fusions is not None:
+			self.fusions = np.genfromtxt(args.fusions, delimiter = ',')
+			feature_layers.append(self.fusions)
+			print('Loaded fusions: %d cells x %d genes' % (self.fusions.shape[0], self.fusions.shape[1]))
+		self.cell_features = np.dstack(feature_layers)
+		print('Cell feature tensor shape: %s (cells x genes x features)' % str(self.cell_features.shape))
 
 		self.train_feature, self.train_label, self.val_feature, self.val_label = self.prepare_train_data()
 
 
 	def prepare_train_data(self):
-		return util.prepare_train_data(self.train, self.cell_id_mapping, self.zscore_method, self.std)
+		return util.prepare_train_data(self.train, self.cell_id_mapping, self.zscore_method, self.std, self.label_col, self.task, seed=self.seed)
 
 	def load_ontology(self, file_name):
 
@@ -72,8 +84,7 @@ class TrainingDataWrapper():
 					term_gene_set = term_gene_set | term_direct_gene_map[child]
 			# jisoo
 			if len(term_gene_set) == 0:
-				print('There is empty terms, please delete term:', term)
-				sys.exit(1)
+				raise ValueError(f'Term {term!r} has no annotated genes — remove it from the ontology file.')
 			else:
 				term_size_map[term] = len(term_gene_set)
 
@@ -87,11 +98,9 @@ class TrainingDataWrapper():
 		print('There are', len(connected_subG_list), 'connected componenets')
 
 		if len(roots) > 1:
-			print('There are more than 1 root of ontology. Please use only one root.')
-			sys.exit(1)
+			raise ValueError(f'Ontology has {len(roots)} roots ({roots}); exactly one root is required.')
 		if len(connected_subG_list) > 1:
-			print('There are more than connected components. Please connect them.')
-			sys.exit(1)
+			raise ValueError(f'Ontology has {len(connected_subG_list)} disconnected components; all terms must be connected.')
 
 		self.dG = dG
 		self.root = roots[0]

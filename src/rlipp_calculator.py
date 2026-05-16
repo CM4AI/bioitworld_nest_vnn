@@ -8,10 +8,7 @@ from joblib import Parallel, delayed
 from sklearn.decomposition import PCA
 from sklearn.linear_model import RidgeCV
 
-import warnings
-warnings.filterwarnings('ignore')
-warnings.filterwarnings(action='ignore',category=DeprecationWarning)
-warnings.filterwarnings(action='ignore',category=FutureWarning)
+
 
 
 class RLIPPCalculator():
@@ -62,6 +59,8 @@ class RLIPPCalculator():
 	#Load the hidden file for a given element
 	def load_feature(self, element, size):
 		file_name = self.hidden_dir + element + '.hidden'
+		if not os.path.exists(file_name):
+			return None
 		return np.loadtxt(file_name, usecols=range(size))
 
 
@@ -87,18 +86,21 @@ class RLIPPCalculator():
 		feature_map = {}
 		with Pool(self.cpu_count) as p:
 			results = p.map(self.load_term_features, self.terms)
-		for i,t in enumerate(self.terms):
-			feature_map[t] = results[i]
+		for i, t in enumerate(self.terms):
+			if results[i] is not None:
+				feature_map[t] = results[i]
 		with Pool(self.cpu_count) as p:
 			results = p.map(self.load_gene_features, self.genes)
-		for i,g in enumerate(self.genes):
-			feature_map[g] = results[i]
+		for i, g in enumerate(self.genes):
+			if results[i] is not None:
+				feature_map[g] = results[i]
 
 		child_feature_map = {t:[] for t in self.terms}
 		for term in self.terms:
 			children = [row['T'] for _,row in self.ontology.iterrows() if row['S']==term]
 			for child in children:
-				child_feature_map[term].append(feature_map[child])
+				if child in feature_map:
+					child_feature_map[term].append(feature_map[child])
 
 		return feature_map, child_feature_map
 
@@ -115,7 +117,8 @@ class RLIPPCalculator():
 	#and returns the spearman correlation value of the predicted output
 	def exec_lm(self, X, y):
 
-		pca = PCA(n_components=self.num_hiddens_genotype)
+		n_components = min(self.num_hiddens_genotype, X.shape[0], X.shape[1])
+		pca = PCA(n_components=n_components)
 		X_pca = pca.fit_transform(X)
 
 		regr = RidgeCV(cv=5)
@@ -132,7 +135,7 @@ class RLIPPCalculator():
 		y = np.take(self.predicted_vals, position_map)
 		p_rho, p_pval = self.exec_lm(X_parent, y)
 		c_rho, c_pval = self.exec_lm(X_child, y)
-		rlipp = p_rho/c_rho
+		rlipp = p_rho / c_rho if abs(c_rho) > 1e-10 else 0.0
 		result = '{}\t{:.3e}\t{:.3e}\t{:.3e}\t{:.3e}\t{:.3e}\n'.format(term, p_rho, p_pval, c_rho, c_pval, rlipp)
 		return result
 
