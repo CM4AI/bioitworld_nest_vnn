@@ -670,7 +670,7 @@ def build_mutation_matrix(mutations_df, sample_ids, gene2ind):
             matrix[sample2idx[s], gene2ind[g]] = 1
             mapped += 1
     panel_hit = int(np.sum(matrix.any(axis=0)))
-    print(f"  Mutations: {mapped}/{len(mutations_df)} mapped ({panel_hit}/{n_genes} genes hit)")
+    print(f"  Mutations:        {mapped}/{len(mutations_df)} mapped ({panel_hit}/{n_genes} genes hit)")
     return matrix
 
 
@@ -704,7 +704,10 @@ def build_cnv_matrices(cnv_df, sample_ids, gene2ind):
             del_m[si, gi] = 1; dc += 1
         if v >= CNV_AMPLIFICATION:
             amp_m[si, gi] = 1; ac += 1
-    print(f"  CNV deletions: {dc}, amplifications: {ac}")
+    del_hit = int(np.sum(del_m.any(axis=0)))
+    amp_hit = int(np.sum(amp_m.any(axis=0)))
+    print(f"  CN deletions:     {dc} events ({del_hit}/{n_genes} genes hit)")
+    print(f"  CN amplifications: {ac} events ({amp_hit}/{n_genes} genes hit)")
     return del_m, amp_m
 
 
@@ -720,7 +723,7 @@ def build_fusion_matrix(fusions_df, sample_ids, gene2ind):
                            "gene1.hugoGeneSymbol", "gene2.hugoGeneSymbol"]
                if c in fusions_df.columns]
     has_sv = len(sv_cols) > 0
-    ev, gm = 0, 0
+    ev = 0
     for _, row in fusions_df.iterrows():
         s = row.get("sampleId")
         if s not in sample2idx:
@@ -741,11 +744,11 @@ def build_fusion_matrix(fusions_df, sample_ids, gene2ind):
         hit = False
         for g in genes:
             if g in gene2ind:
-                matrix[si, gene2ind[g]] = 1; gm += 1; hit = True
+                matrix[si, gene2ind[g]] = 1; hit = True
         if hit:
             ev += 1
     panel_hit = int(np.sum(matrix.any(axis=0)))
-    print(f"  Fusions: {ev}/{len(fusions_df)} events ({gm} gene marks, {panel_hit}/{n_genes} genes)")
+    print(f"  Fusions:          {ev}/{len(fusions_df)} events ({panel_hit}/{n_genes} genes hit)")
     return matrix
 
 
@@ -915,14 +918,15 @@ def write_readme(output_dir, sample_ids, gene2ind, endpoints,
     any_alt = (mut_matrix | del_matrix | amp_matrix | fus_matrix)
     w("## Feature Matrices")
     w("")
-    w("| Feature | Non-zero | Density |")
-    w("|---|---|---|")
+    w("| Feature | Events | Genes hit | Density |")
+    w("|---|---|---|---|")
     for name, mat in [("Mutations", mut_matrix), ("CN Deletions", del_matrix),
                       ("CN Amplifications", amp_matrix), ("Fusions", fus_matrix)]:
-        w(f"| {name} | {int(mat.sum())} | {100*mat.mean():.2f}% |")
+        genes_hit = int(np.sum(mat.any(axis=0)))
+        w(f"| {name} | {int(mat.sum())} | {genes_hit}/{n_g} | {100*mat.mean():.2f}% |")
     w(f"| **Any alteration** | {int(any_alt.sum())} | "
-      f"samples={int(np.sum(any_alt.any(axis=1)))}/{n_s}, "
-      f"genes={int(np.sum(any_alt.any(axis=0)))}/{n_g} |")
+      f"{int(np.sum(any_alt.any(axis=0)))}/{n_g} | "
+      f"samples={int(np.sum(any_alt.any(axis=1)))}/{n_s}, {100*any_alt.mean():.2f}% |")
     w("")
 
     if not training_df.empty and endpoints:
