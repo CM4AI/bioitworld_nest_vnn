@@ -100,6 +100,9 @@ Downloads the original GDSC drug-response dataset (1,244 cell lines, 718 genes, 
 | `<label>/metrics/hidden/<gene>.hidden` | Hidden embeddings per gene (samples × 1) |
 | `<label>/annotation/rlipp_scores.txt` | RLIPP scores per ontology term (cross-cohort) |
 | `<label>/annotation/gene_scores.txt` | Gene-level Spearman correlations (cross-cohort) |
+| `<label>/annotation/subsystem_gene_weights.txt` | Per-term gene rankings by PC1 correlation — which genes most drive each system's primary axis of variation |
+| `<label>/annotation/top_subsystem_genes.txt` | Quick-read summary: top 20 systems × top 5 driving genes |
+| `<label>/annotation/boolean_logic.txt` | Boolean logic characterization of child system pairs — AND/OR/XOR/etc. gate fits for parent–child relationships |
 | `<label>/annotation/hierarchy_annotated.graphml` | Annotated hierarchy graph (open in Cytoscape) |
 | `<label>/annotation/hierarchy_annotated.cx2` | CX2 format for NDEx/Cytoscape Web (requires `ndex2`) |
 | `<label>/annotation/hierarchy_viz.html` | Standalone interactive browser visualization |
@@ -149,12 +152,58 @@ Each row corresponds to one gene. Scores are computed directly from each gene's 
 
 Genes are sorted by `|rho|` (absolute correlation). High `|rho|` with low `p_val` indicates a gene whose genomic state (mutation/CNV status) is consistently predictive of the clinical outcome across the sample population.
 
+### Subsystem gene weights (`subsystem_gene_weights.txt`)
+
+For each ontology term, ranks the genes directly annotated to it by how strongly their scalar hidden embedding correlates with the first principal component (PC1) of that term's multi-dimensional hidden embedding across all samples.
+
+| Column | Meaning |
+|---|---|
+| `term` | Ontology system identifier |
+| `gene` | Gene symbol |
+| `pc1_corr` | Spearman ρ between the gene's scalar embedding and the term's PC1. High \|pc1_corr\| means this gene's activation is a primary driver of the system's dominant axis of variation. Positive = activation pushes the system in its primary direction; negative = opposite direction. |
+| `pc1_corr_pval` | p-value for `pc1_corr` |
+| `rank` | Within-term rank by \|pc1_corr\| (1 = strongest driver) |
+
+`top_subsystem_genes.txt` summarizes the top 5 driving genes per system for the 20 highest-RLIPP terms. These also appear as **Key driving genes** in `hierarchy_viz.html`.
+
+### Boolean logic gate analysis (`boolean_logic.txt`)
+
+Characterizes how each parent system integrates signals from pairs of its direct child systems. For each parent with ≥2 term children, all child pairs (A, B) are tested: each system's activity is binarized at the median of its PC1 across patients, a majority-vote truth table is built for each (A-state, B-state) → parent-state combination, then matched against 10 non-trivial Boolean functions (following Ma et al. 2018, DCell/VNN). Only trios where every input combination has ≥4 and ≤50% of samples are included.
+
+| Column | Meaning |
+|---|---|
+| `parent` | Parent system |
+| `child1` | Child system A |
+| `child2` | Child system B |
+| `logic` | Best-matching Boolean function name (see gate table below) |
+| `consistency` | Fraction of samples where the parent's binarized state matches the gate prediction. ≥0.70: high; ≥0.60: moderate; <0.60: weak. |
+| `n_samples` | Number of samples used |
+
+**Gate type interpretations:**
+
+| Gate | Symbol | Biological interpretation |
+|---|---|---|
+| `AND` | A∧B | **Co-requirement** — both child systems must be active to activate the parent |
+| `OR` | A∨B | **Redundancy** — either child alone is sufficient to activate the parent |
+| `XOR` | A⊕B | **Mutual exclusivity** — exactly one child active; co-activation suppresses the parent |
+| `NAND` | ¬(A∧B) | **Negative synergy** — parent is active unless both children are simultaneously on |
+| `NOR` | ¬(A∨B) | **Dual inhibition** — parent is active only when both children are inactive |
+| `XNOR` | A↔B | **Concordance** — parent is active when both children share the same state (both on or both off) |
+| `A_NOT_B` | A∧¬B | **A dominant with inhibitor** — parent active when A is on and B is off |
+| `B_NOT_A` | B∧¬A | **B dominant with inhibitor** — parent active when B is on and A is off |
+| `A_OR_NOT_B` | A∨¬B | Parent active in all states except when B alone is on |
+| `B_OR_NOT_A` | B∨¬A | Parent active in all states except when A alone is on |
+
+> **Note:** Gate assignments are data-driven and depend on the binarization threshold (median PC1). They describe emergent computational patterns in the network's learned representations, not necessarily direct biochemical mechanisms. High-consistency gates (≥70%) at high-RLIPP systems are the most biologically interpretable. Rows with consistency <0.60 are generally noise and should be disregarded.
+
 ### Interactive visualization (`hierarchy_viz.html`)
 
 Open in any browser (no server required). Click any system in the left-hand table to see:
 - **RLIPP, P_rho, P_pval, C_rho, C_pval** for that system
 - **Parent and child systems** (clickable to navigate the hierarchy)
-- **Term-specific genes**: genes annotated to this system level that are not inherited from any child system, with their gene-level ρ scores
+- **Key driving genes**: top genes by |PC1 correlation| for this system's hidden embedding, with direction color-coding (from `subsystem_gene_weights.txt`)
+- **Boolean logic relationships**: gate fits for pairs of child systems, colored by consistency. Click **? help** to expand an in-page explanation of the methodology and each gate type (from `boolean_logic.txt`)
+- **Term-specific genes**: genes annotated to this system that are not inherited from any child system, with their gene-level ρ scores
 - **Genes from child systems**: genes contributed by immediate child systems, sorted by |ρ|
 
 Use the sort and filter controls to focus on high-RLIPP systems or search by name.

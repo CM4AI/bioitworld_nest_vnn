@@ -961,17 +961,58 @@ function showDetail(termId) {{
             'XNOR':'A↔B', 'A_NOT_B':'A∧¬B', 'B_NOT_A':'B∧¬A',
             'A_OR_NOT_B':'A∨¬B', 'B_OR_NOT_A':'B∨¬A',
         }};
-        html += `<div class="children" style="margin-top:14px"><strong>Boolean logic relationships (${{node.bool_logic.length}}):</strong>`;
-        html += ` <span style="color:#666;font-size:11px">parent state ≈ f(child1, child2) binarized at median PC1</span><br>`;
+        const logicDesc = {{
+            'AND':        'Co-requirement: both children must be active to activate parent',
+            'OR':         'Redundancy: either child alone is sufficient to activate parent',
+            'XOR':        'Mutual exclusivity: exactly one child active, not both simultaneously',
+            'NOR':        'Dual inhibition: parent active only when both children are inactive',
+            'NAND':       'Negative synergy: parent active unless both children are simultaneously on',
+            'XNOR':       'Concordance: parent active when both children share the same state',
+            'A_NOT_B':    'A dominates: parent active when A is on and B is off',
+            'B_NOT_A':    'B dominates: parent active when B is on and A is off',
+            'A_OR_NOT_B': 'A or not-B: parent active in all states except when B alone is on',
+            'B_OR_NOT_A': 'B or not-A: parent active in all states except when A alone is on',
+        }};
+        html += `<div class="children" style="margin-top:14px">`;
+        html += `<strong>Boolean logic relationships (${{node.bool_logic.length}})</strong> `;
+        html += `<span style="color:#666;font-size:11px">parent state ≈ f(child1, child2) binarized at median PC1</span> `;
+        html += `<span style="cursor:pointer;border:1px solid #334;border-radius:3px;padding:0 5px;font-size:10px;color:#668;margin-left:4px" onclick="var e=document.getElementById('bhelp-${{termId}}');e.style.display=e.style.display==='none'?'block':'none'">? help</span><br>`;
+        html += `<div id="bhelp-${{termId}}" style="display:none;margin:6px 0 6px;padding:10px 14px;background:#0d180d;border:1px solid #253525;border-radius:4px;font-size:11px;color:#999;line-height:1.8">`;
+        html += `<strong style="color:#bbb">About this analysis</strong><br>`;
+        html += `For each parent system with two or more child subsystems, all child pairs (A, B) are tested. `;
+        html += `Each system's activity is binarized at the median of its first principal component (PC1) across patients. `;
+        html += `A majority-vote truth table is built for each (A-state, B-state) combination, then matched against `;
+        html += `10 non-trivial Boolean functions (following Ma et al. 2018 DCell/VNN). A match reveals how the parent `;
+        html += `system logically integrates signals from its children.<br><br>`;
+        html += `<strong style="color:#bbb">Gate types:</strong><br>`;
+        [['A∧B',    'AND',        'Co-requirement — both children must be active'],
+         ['A∨B',    'OR',         'Redundancy — either child alone is sufficient'],
+         ['A⊕B',    'XOR',        'Mutual exclusivity — exactly one child active'],
+         ['¬(A∧B)', 'NAND',       'Negative synergy — blocked only when both are on'],
+         ['¬(A∨B)', 'NOR',        'Dual inhibition — active only when both are off'],
+         ['A↔B',    'XNOR',       'Concordance — same activation state in both children'],
+         ['A∧¬B',   'A_NOT_B',   'A dominant: on when A on, B off'],
+         ['B∧¬A',   'B_NOT_A',   'B dominant: on when B on, A off'],
+        ].forEach(([sym, name, desc]) => {{
+            html += `<span style="color:#7eb8da;font-family:monospace;display:inline-block;min-width:62px">${{sym}}</span>`;
+            html += `<span style="color:#aaa"> ${{name}}</span>: ${{desc}}<br>`;
+        }});
+        html += `<br><strong style="color:#bbb">Consistency</strong>: fraction of patients whose parent state matches the gate prediction. `;
+        html += `<span style="color:#f5a623">≥70% high</span> · <span style="color:#7eb8da">≥60% moderate</span> · <span style="color:#888">&lt;60% weak</span>`;
+        html += `</div>`;
         node.bool_logic.forEach(bl => {{
-            const icon = logicIcons[bl.logic] || bl.logic;
+            const icon      = logicIcons[bl.logic] || bl.logic;
+            const desc      = logicDesc[bl.logic] || '';
+            const shortDesc = desc ? desc.split(':')[0] : '';
             const pct  = Math.round(bl.consistency * 100);
             const col  = bl.consistency >= 0.7 ? '#f5a623' : bl.consistency >= 0.6 ? '#7eb8da' : '#888';
             html += `<span class="child" style="border-left:3px solid ${{col}}" `;
-            html += `title="child1=${{bl.child1}}, child2=${{bl.child2}}, n=${{bl.n_samples}}">`;
+            html += `title="${{bl.logic}}: ${{desc}}&#10;A = ${{bl.child1}}&#10;B = ${{bl.child2}}&#10;n = ${{bl.n_samples}} samples&#10;consistency = ${{pct}}%">`;
             html += `<span style="color:${{col}};font-weight:bold">${{icon}}</span> `;
             html += `<span style="color:#888;font-size:10px">[A=${{bl.child1}}, B=${{bl.child2}}]</span> `;
-            html += `<span style="color:#aaa;font-size:10px">consistency=${{pct}}%</span></span>`;
+            html += `<span style="color:${{col}};font-size:10px"> ${{pct}}%</span>`;
+            if (shortDesc) html += ` <span style="color:#555;font-size:10px;font-style:italic">${{shortDesc}}</span>`;
+            html += `</span>`;
         }});
         html += `</div>`;
     }}
@@ -1073,7 +1114,10 @@ class PatientScoreCalculator:
             with open(test_path) as f:
                 first = f.readline().strip()
             if 'cell_line' in first:
-                df = pd.read_csv(test_path, sep='\t', usecols=['cell_line'])
+                df = pd.read_csv(test_path, sep='\t')
+                label_col = getattr(args, 'label', None)
+                if label_col and label_col in df.columns:
+                    df = df.dropna(subset=[label_col])
                 return list(df['cell_line'].astype(str))
             else:
                 df = pd.read_csv(test_path, sep='\t', header=None)
@@ -1612,9 +1656,9 @@ def main():
     # Build annotated hierarchy
     print("\nBuilding annotated hierarchy ...")
     outdir = Path(args.outdir)
-    G = build_annotated_hierarchy(args.ontology, rlipp_df, gene_df, outdir,
-                                  subsys_gene_df=subsys_gene_df,
-                                  bool_logic_df=bool_logic_df)
+    build_annotated_hierarchy(args.ontology, rlipp_df, gene_df, outdir,
+                              subsys_gene_df=subsys_gene_df,
+                              bool_logic_df=bool_logic_df)
 
     # Detect cBioPortal study for patient page links
     meta_path = input_dir / "metadata.json"

@@ -108,7 +108,6 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 					params["label"] = label
 				mlflow.log_params(params)
 				mlflow.log_metric(metric_name, metric_value)
-				mlflow.log_artifact(model_file)
 
 				# Persist run_id so annotate step can resume this run to log artifacts
 				predict_run_id_path = Path(result_file).parent / "mlflow_run_id.txt"
