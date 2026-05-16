@@ -17,7 +17,7 @@ def main():
 	parser.add_argument('-alpha', help = 'Loss parameter alpha', type = float, default = 0.3)
 	parser.add_argument('-batchsize', help = 'Batchsize', type = int, default = 64)
 	parser.add_argument('-modeldir', help = 'Folder for trained models', type = str, default = 'MODEL/')
-	parser.add_argument('-cuda', help = 'Specify GPU', type = int, default = 0)
+	parser.add_argument('-cuda', help = "GPU index, or 'cpu' for CPU-only", type = str, default = '0')
 	parser.add_argument('-gene2id', help = 'Gene to ID mapping file', type = str)
 	parser.add_argument('-cell2id', help = 'Cell to ID mapping file', type = str)
 	parser.add_argument('-genotype_hiddens', help = 'Mapping for the number of neurons in each term in genotype parts', type = int, default = 4)

@@ -460,7 +460,7 @@ class VNNTrainer():
 				mlflow.log_input(MetaDataset(source=src, name=meta.get("ndex_uuid", "ontology")), context="ontology")
 
 		self.model = DrugCellNN(self.data_wrapper)
-		self.model.cuda(self.data_wrapper.cuda)
+		self.model.to(self.data_wrapper.device)
 
 		if mlflow_enabled:
 			import mlflow
@@ -499,7 +499,7 @@ class VNNTrainer():
 		best_epoch = None
 
 		early_stopping_counter = 0
-		term_mask_map = util.create_term_mask(self.model.term_direct_gene_map, self.model.gene_dim, self.data_wrapper.cuda)
+		term_mask_map = util.create_term_mask(self.model.term_direct_gene_map, self.model.gene_dim, self.data_wrapper.device)
 		for name, param in self.model.named_parameters():
 			if '_direct_gene_layer.weight' in name:
 				term_name = name.split('_direct_gene_layer')[0]
@@ -516,15 +516,15 @@ class VNNTrainer():
 		for epoch in range(self.data_wrapper.epochs):
 			# Train
 			self.model.train()
-			train_predict = torch.zeros(0, 0).cuda(self.data_wrapper.cuda)
-			_gradnorms = torch.zeros(len(train_loader)).cuda(self.data_wrapper.cuda)
+			train_predict = torch.zeros(0, 0).to(self.data_wrapper.device)
+			_gradnorms = torch.zeros(len(train_loader)).to(self.data_wrapper.device)
 			epoch_train_loss = 0.0
 			n_train_batches = 0
 
 			for i, (inputdata, labels) in enumerate(train_loader):
 				features = util.build_input_vector(inputdata, self.data_wrapper.cell_features)
-				cuda_features = Variable(features.cuda(self.data_wrapper.cuda))
-				cuda_labels = Variable(labels.cuda(self.data_wrapper.cuda))
+				cuda_features = Variable(features.to(self.data_wrapper.device))
+				cuda_labels = Variable(labels.to(self.data_wrapper.device))
 
 				optimizer.zero_grad()
 
@@ -576,15 +576,15 @@ class VNNTrainer():
 
 			self.model.eval()
 
-			val_predict = torch.zeros(0, 0).cuda(self.data_wrapper.cuda)
+			val_predict = torch.zeros(0, 0).to(self.data_wrapper.device)
 			epoch_val_loss = 0.0
 			n_val_batches = 0
 
 			with torch.no_grad():
 				for i, (inputdata, labels) in enumerate(val_loader):
 					features = util.build_input_vector(inputdata, self.data_wrapper.cell_features)
-					cuda_features = Variable(features.cuda(self.data_wrapper.cuda))
-					cuda_labels = Variable(labels.cuda(self.data_wrapper.cuda))
+					cuda_features = Variable(features.to(self.data_wrapper.device))
+					cuda_labels = Variable(labels.to(self.data_wrapper.device))
 
 					aux_out_map, _ = self.model(cuda_features)
 
@@ -672,10 +672,10 @@ class VNNTrainer():
 			if min_loss is not None:
 				best_model = torch.load(
 					self.data_wrapper.modeldir + '/model_final.pt',
-					map_location=f'cuda:{self.data_wrapper.cuda}',
+					map_location=self.data_wrapper.device,
 					weights_only=False,
 				)
-				best_model.cuda(self.data_wrapper.cuda)
+				best_model.to(self.data_wrapper.device)
 				best_model.eval()
 
 			if self.task == 'binary' and best_model is not None:
@@ -692,7 +692,7 @@ class VNNTrainer():
 					with torch.no_grad():
 						for inputdata, batch_labels in loader:
 							feats = util.build_input_vector(inputdata, self.data_wrapper.cell_features)
-							aux_out_map, _ = best_model(feats.cuda(self.data_wrapper.cuda))
+							aux_out_map, _ = best_model(feats.to(self.data_wrapper.device))
 							probs = torch.sigmoid(aux_out_map['final'])
 							preds = (probs >= 0.5).float().cpu().numpy().flatten()
 							all_preds.extend(preds.tolist())
@@ -731,7 +731,7 @@ class VNNTrainer():
 						self.val_feature[:n_sig], self.data_wrapper.cell_features
 					)
 					with torch.no_grad():
-						sig_aux, _ = best_model(sig_input.cuda(self.data_wrapper.cuda))
+						sig_aux, _ = best_model(sig_input.to(self.data_wrapper.device))
 					sig_out = sig_aux['final'].cpu().numpy()
 					signature = mlflow.models.infer_signature(sig_input.numpy(), sig_out)
 

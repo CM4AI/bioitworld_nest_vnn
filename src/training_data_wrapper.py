@@ -2,8 +2,20 @@ import numpy as np
 import networkx as nx
 import networkx.algorithms.components.connected as nxacc
 import networkx.algorithms.dag as nxadag
+import torch
 
 import util
+
+
+def resolve_device(cuda_arg) -> torch.device:
+	"""Return a torch.device from a -cuda argument value ('cpu', '-1', or a GPU index)."""
+	s = str(cuda_arg).strip().lower()
+	if s in ("cpu", "-1"):
+		return torch.device("cpu")
+	try:
+		return torch.device(f"cuda:{int(s)}")
+	except ValueError:
+		return torch.device("cpu")
 
 
 class TrainingDataWrapper():
@@ -19,7 +31,7 @@ class TrainingDataWrapper():
 		self.epochs = args.epoch
 		self.batchsize = args.batchsize
 		self.modeldir = args.modeldir
-		self.cuda = args.cuda
+		self.device = resolve_device(args.cuda)
 		self.train = args.train
 		self.zscore_method = args.zscore_method
 		self.std = args.std

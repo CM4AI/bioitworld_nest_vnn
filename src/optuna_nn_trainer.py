@@ -63,9 +63,9 @@ class OptunaNNTrainer(VNNTrainer):
 		self.setup_trials(trial)
 
 		self.model = DrugCellNN(self.data_wrapper)
-		self.model.cuda(self.data_wrapper.cuda)
+		self.model.to(self.data_wrapper.device)
 
-		term_mask_map = util.create_term_mask(self.model.term_direct_gene_map, self.model.gene_dim, self.data_wrapper.cuda)
+		term_mask_map = util.create_term_mask(self.model.term_direct_gene_map, self.model.gene_dim, self.data_wrapper.device)
 		for name, param in self.model.named_parameters():
 			if '_direct_gene_layer.weight' in name:
 				term_name = name.split('_direct_gene_layer')[0]
@@ -86,13 +86,13 @@ class OptunaNNTrainer(VNNTrainer):
 		for epoch in range(self.data_wrapper.epochs):
 			# Train
 			self.model.train()
-			train_predict = torch.zeros(0, 0).cuda(self.data_wrapper.cuda)
+			train_predict = torch.zeros(0, 0).to(self.data_wrapper.device)
 
 			for i, (inputdata, labels) in enumerate(train_loader):
 				# Convert torch tensor to Variable
 				features = util.build_input_vector(inputdata, self.data_wrapper.cell_features)
-				cuda_features = Variable(features.cuda(self.data_wrapper.cuda))
-				cuda_labels = Variable(labels.cuda(self.data_wrapper.cuda))
+				cuda_features = Variable(features.to(self.data_wrapper.device))
+				cuda_labels = Variable(labels.to(self.data_wrapper.device))
 
 				# Forward + Backward + Optimize
 				optimizer.zero_grad()  # zero the gradient buffer
@@ -135,15 +135,15 @@ class OptunaNNTrainer(VNNTrainer):
 
 			self.model.eval()
 
-			val_predict = torch.zeros(0, 0).cuda(self.data_wrapper.cuda)
+			val_predict = torch.zeros(0, 0).to(self.data_wrapper.device)
 
 			val_loss = 0
 			with torch.no_grad():
 				for i, (inputdata, labels) in enumerate(val_loader):
 					# Convert torch tensor to Variable
 					features = util.build_input_vector(inputdata, self.data_wrapper.cell_features)
-					cuda_features = Variable(features.cuda(self.data_wrapper.cuda))
-					cuda_labels = Variable(labels.cuda(self.data_wrapper.cuda))
+					cuda_features = Variable(features.to(self.data_wrapper.device))
+					cuda_labels = Variable(labels.to(self.data_wrapper.device))
 
 					aux_out_map, _ = self.model(cuda_features)
 

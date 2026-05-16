@@ -15,19 +15,19 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 
 	feature_dim = gene_dim
 
-	model = torch.load(model_file, map_location='cuda:%d' % CUDA_ID, weights_only=False)
+	model = torch.load(model_file, map_location=DEVICE, weights_only=False)
 
 	predict_feature, predict_label = predict_data
 
-	predict_label_gpu = predict_label.cuda(CUDA_ID)
+	predict_label_gpu = predict_label.to(DEVICE)
 
-	model.cuda(CUDA_ID)
+	model.to(DEVICE)
 	model.eval()
 
 	test_loader = du.DataLoader(du.TensorDataset(predict_feature, predict_label), batch_size=batch_size, shuffle=False)
 
 	#Test
-	test_predict = torch.zeros(0,0).cuda(CUDA_ID)
+	test_predict = torch.zeros(0,0).to(DEVICE)
 	hidden_embeddings_map = {}
 
 	saved_grads = {}
@@ -40,7 +40,7 @@ def predict(predict_data, gene_dim, model_file, hidden_folder, batch_size, resul
 		# Convert torch tensor to Variable
 		features = util.build_input_vector(inputdata, cell_features)
 
-		cuda_features = Variable(features.cuda(CUDA_ID), requires_grad=True)
+		cuda_features = Variable(features.to(DEVICE), requires_grad=True)
 
 		# make prediction for test data
 		aux_out_map, hidden_embeddings_map = model(cuda_features)
@@ -126,7 +126,7 @@ parser.add_argument('-cell2id', help='Cell to ID mapping file', type=str)
 parser.add_argument('-load', help='Model file', type=str)
 parser.add_argument('-hidden', help='Hidden output folder', type=str, default='hidden/')
 parser.add_argument('-result', help='Result file prefix', type=str, default='result/predict')
-parser.add_argument('-cuda', help='Specify GPU', type=int, default=0)
+parser.add_argument('-cuda', help="GPU index, or 'cpu' for CPU-only", type=str, default='0')
 parser.add_argument('-mutations', help = 'Mutation information for cell lines', type = str)
 parser.add_argument('-cn_deletions', help = 'Copy number deletions for cell lines', type = str)
 parser.add_argument('-cn_amplifications', help = 'Copy number amplifications for cell lines', type = str)
@@ -157,6 +157,7 @@ cell_features = np.dstack(feature_layers)
 num_cells = len(cell2id_mapping)
 num_genes = len(gene2id_mapping)
 
-CUDA_ID = opt.cuda
+from training_data_wrapper import resolve_device
+DEVICE = resolve_device(opt.cuda)
 
 predict(predict_data, num_genes, opt.load, opt.hidden, opt.batchsize, opt.result, cell_features, opt.task, mlflow_enabled=not opt.no_mlflow, label=opt.label)

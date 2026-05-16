@@ -256,7 +256,7 @@ def run_train():
 
     print("\nParameters (press Enter to keep default):")
     print(f"  task:       {task}  (from {task_source})")
-    cuda             = _param("cuda",             "0",      "GPU index")
+    cuda             = _param("cuda",             "0",      "GPU index or 'cpu'")
     epochs           = _param("epoch",            "200")
     batchsize        = _param("batchsize",         "512")
     lr               = _param("lr",               "0.001", "learning rate")
