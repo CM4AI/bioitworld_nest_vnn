@@ -364,9 +364,14 @@ def compute_altered_genes(mut_df: pd.DataFrame, cnv_df: pd.DataFrame,
     return set(counts[counts >= threshold].index)
 
 
-def build_ontology_from_ndex(uuid: str, gene_set: set) -> tuple[dict, list]:
+def build_ontology_from_ndex(uuid: str, gene_set: set, min_genes: int = 5) -> tuple[dict, list]:
     """
     Download hierarchy from NDEx and build gene2ind + ontology rows filtered to gene_set.
+
+    Only assemblies whose CD_MemberList contains >= min_genes panel genes are kept
+    (matching the NeST-VNN paper: "assemblies encoded by at least five genes represented
+    on the 718-gene clinical panel"). Pruned intermediate nodes are bridged over so their
+    surviving children are promoted to the nearest surviving ancestor.
 
     Returns:
         gene2ind     : {gene_symbol: index}  sorted alphabetically
@@ -380,33 +385,75 @@ def build_ontology_from_ndex(uuid: str, gene_set: set) -> tuple[dict, list]:
           f"{len(all_network_genes)} unique gene members in network")
 
     # Filter gene members to the requested gene_set
-    filtered: dict[int, list] = {
-        nid: [g for g in genes if g in gene_set]
+    filtered: dict[int, set] = {
+        nid: {g for g in genes if g in gene_set}
         for nid, genes in node_genes.items()
     }
 
-    # Build children map for subtree gene counting
+    # Build parent/children maps
     children_of: dict[int, list] = {}
+    parent_of: dict[int, list] = {}
     for src, tgt in raw_edges:
         children_of.setdefault(src, []).append(tgt)
+        parent_of.setdefault(tgt, []).append(src)
 
-    def subtree_genes(nid: int, visited: set | None = None) -> set:
+    # Keep only terms whose CD_MemberList (= full HiDeF cluster membership, already
+    # includes all sub-cluster genes) has >= min_genes panel genes.
+    surviving = {nid for nid in node_names if len(filtered.get(nid, set())) >= min_genes}
+    n_pruned = len(node_names) - len(surviving)
+    if n_pruned:
+        print(f"  Pruned {n_pruned} assemblies with <{min_genes} panel genes "
+              f"(paper threshold: at least {min_genes})")
+
+    # For hierarchy edges, bridge over pruned intermediate nodes: find the nearest
+    # surviving ancestor for each surviving node, then emit a direct edge.
+    def surviving_parents(nid: int, visited: set | None = None) -> set:
         if visited is None:
             visited = set()
         if nid in visited:
             return set()
         visited.add(nid)
-        result = set(filtered.get(nid, []))
-        for child in children_of.get(nid, []):
-            result |= subtree_genes(child, visited)
+        result = set()
+        for p in parent_of.get(nid, []):
+            if p in surviving:
+                result.add(p)
+            else:
+                result |= surviving_parents(p, visited)
         return result
 
-    terms_with_genes = {nid for nid in node_names if subtree_genes(nid)}
+    # Deduplicate gene annotations: CD_MemberList in HiDeF hierarchies includes
+    # all descendant members at every level, so a gene that belongs to a child term
+    # will also appear in every ancestor's member list. After pruning, keep only the
+    # most specific (deepest surviving) assignment for each gene.
+    direct_genes: dict[int, set] = {nid: set(filtered.get(nid, set())) for nid in surviving}
 
-    all_annotated = {g for nid in terms_with_genes for g in filtered.get(nid, [])}
+    def descendant_genes_surviving(nid: int, visited: set | None = None) -> set:
+        if visited is None:
+            visited = set()
+        if nid in visited:
+            return set()
+        visited.add(nid)
+        result = set()
+        for child in children_of.get(nid, []):
+            if child in surviving:
+                result |= direct_genes.get(child, set())
+                result |= descendant_genes_surviving(child, visited)
+            else:
+                # skip pruned node but continue through its children
+                result |= descendant_genes_surviving(child, visited)
+        return result
+
+    deduped: dict[int, set] = {}
+    for nid in surviving:
+        deduped[nid] = direct_genes[nid] - descendant_genes_surviving(nid)
+
+    all_annotated = {g for genes in deduped.values() for g in genes}
     print(f"  Input gene set: {len(gene_set)} genes")
     print(f"  Genes annotated in ontology: {len(all_annotated)}")
-    print(f"  Terms with genes: {len(terms_with_genes)} / {len(node_names)}")
+    print(f"  Surviving terms: {len(surviving)} / {len(node_names)}")
+    n_removed = sum(len(direct_genes[n]) - len(deduped[n]) for n in surviving)
+    if n_removed:
+        print(f"  Removed {n_removed} redundant parent gene annotations (genes already in a child term)")
 
     if not all_annotated:
         raise ValueError(
@@ -417,16 +464,16 @@ def build_ontology_from_ndex(uuid: str, gene_set: set) -> tuple[dict, list]:
     gene2ind = {g: i for i, g in enumerate(sorted(all_annotated))}
 
     ontology_rows: list[tuple] = []
-    for src, tgt in raw_edges:
-        if src in terms_with_genes and tgt in terms_with_genes:
-            ontology_rows.append((node_names[src], node_names[tgt], "default"))
-    for nid in terms_with_genes:
-        for gene in filtered.get(nid, []):
+    for nid in surviving:
+        for par in surviving_parents(nid):
+            ontology_rows.append((node_names[par], node_names[nid], "default"))
+    for nid in surviving:
+        for gene in deduped[nid]:
             ontology_rows.append((node_names[nid], gene, "gene"))
 
     n_term_edges = sum(1 for r in ontology_rows if r[2] == "default")
     n_gene_edges = sum(1 for r in ontology_rows if r[2] == "gene")
-    print(f"  Ontology: {len(terms_with_genes)} terms, "
+    print(f"  Ontology: {len(surviving)} terms, "
           f"{n_term_edges} hierarchy edges, {n_gene_edges} gene annotations")
 
     # Validate with networkx
