@@ -203,6 +203,172 @@ class ClinicalRLIPPCalculator:
         rho, p_val = stats.spearmanr(gene_features[:n], y[:n])
         return {'gene': gene, 'rho': rho, 'p_val': p_val}
 
+    def calc_subsystem_gene_weights(self, feature_map):
+        """
+        For each term, rank directly-annotated genes by how strongly their
+        hidden embedding drives the term's first principal component.
+
+        Follows DrugCell: find the most-varying direction of the term's state
+        (PC1), then rank each directly-annotated gene by Spearman correlation
+        with that direction. High |pc1_corr| means that gene's network
+        activation is a primary driver of this system's state.
+        """
+        gene_rows = self.ontology[self.ontology['I'] == 'gene']
+        ont_direct_genes = gene_rows.groupby('S')['T'].apply(list).to_dict()
+
+        results = []
+        for term in self.terms:
+            if term not in feature_map:
+                continue
+            term_h = feature_map[term]          # (n_samples, n_hiddens)
+            direct_genes = [g for g in ont_direct_genes.get(term, []) if g in feature_map]
+            if not direct_genes or term_h.shape[0] < 5:
+                continue
+
+            try:
+                pca = PCA(n_components=1)
+                pc1 = pca.fit_transform(term_h).squeeze()   # (n_samples,)
+            except Exception:
+                continue
+
+            n = len(pc1)
+            for gene in direct_genes:
+                g_vec = feature_map[gene].squeeze()[:n]
+                if len(g_vec) < 5:
+                    continue
+                rho, p_val = stats.spearmanr(g_vec, pc1[:len(g_vec)])
+                results.append({
+                    'term': term,
+                    'gene': gene,
+                    'pc1_corr': round(float(rho), 4),
+                    'pc1_corr_pval': round(float(p_val), 6),
+                })
+
+        if not results:
+            return pd.DataFrame(columns=['term', 'gene', 'pc1_corr', 'pc1_corr_pval', 'rank'])
+
+        df = pd.DataFrame(results)
+        df = df.dropna(subset=['pc1_corr'])
+        if df.empty:
+            return pd.DataFrame(columns=['term', 'gene', 'pc1_corr', 'pc1_corr_pval', 'rank'])
+
+        df['abs_corr'] = df['pc1_corr'].abs()
+        df['rank'] = (
+            df.groupby('term')['abs_corr']
+            .rank(ascending=False, method='first')
+            .astype(int)
+        )
+        return df.drop(columns=['abs_corr']).sort_values(['term', 'rank']).reset_index(drop=True)
+
+    def calc_boolean_logic(self, feature_map):
+        """
+        Characterize parent-child subsystem relationships as Boolean logic gates.
+
+        For each term with ≥2 direct term children, considers all pairs of
+        children and tests whether the parent's hidden state can be approximated
+        by a Boolean function of the two children's states (AND, OR, XOR, etc.).
+
+        Follows Ma et al. 2018 (DCell/VNN): binarize each subsystem's state at
+        the median of PC1, build a majority-vote truth table for each
+        (child1, child2) combination, then match against 10 non-trivial Boolean
+        functions. Excludes trios where any combination has <4 samples or >50%
+        of all samples.
+        """
+        from itertools import combinations
+
+        # Term-to-term children only (exclude gene-leaf edges)
+        term_children = {}
+        for _, row in self.ontology.iterrows():
+            if row['I'] != 'gene':
+                term_children.setdefault(row['S'], []).append(row['T'])
+
+        # Precompute PC1 and binary (above/below median) states for all terms
+        bin_map = {}
+        for term in self.terms:
+            if term not in feature_map:
+                continue
+            h = feature_map[term]
+            if h.shape[0] < 8:
+                continue
+            try:
+                pc1 = PCA(n_components=1).fit_transform(h).squeeze()
+                bin_map[term] = (pc1 >= np.median(pc1)).astype(int)
+            except Exception:
+                pass
+
+        # Non-trivial Boolean functions: tuple is (F(0,0), F(0,1), F(1,0), F(1,1))
+        # Index encoding: child1_bin * 2 + child2_bin
+        bool_functions = {
+            'AND':        (0, 0, 0, 1),
+            'OR':         (0, 1, 1, 1),
+            'XOR':        (0, 1, 1, 0),
+            'A_NOT_B':    (0, 0, 1, 0),   # child1 active, child2 inactive
+            'B_NOT_A':    (0, 1, 0, 0),   # child2 active, child1 inactive
+            'NOR':        (1, 0, 0, 0),
+            'NAND':       (1, 1, 1, 0),
+            'XNOR':       (1, 0, 0, 1),
+            'A_OR_NOT_B': (1, 0, 1, 1),
+            'B_OR_NOT_A': (1, 1, 0, 1),
+        }
+        tt_to_name = {v: k for k, v in bool_functions.items()}
+
+        results = []
+        for term in self.terms:
+            if term not in bin_map:
+                continue
+            children = [c for c in term_children.get(term, []) if c in bin_map]
+            if len(children) < 2:
+                continue
+
+            parent_bin = bin_map[term]
+            n = len(parent_bin)
+
+            for c1, c2 in combinations(children, 2):
+                c1_bin = bin_map[c1][:n]
+                c2_bin = bin_map[c2][:n]
+
+                # votes[idx] = [count_parent_0, count_parent_1]
+                votes = [[0, 0] for _ in range(4)]
+                for i in range(n):
+                    idx = int(c1_bin[i]) * 2 + int(c2_bin[i])
+                    votes[idx][int(parent_bin[i])] += 1
+
+                counts = [v[0] + v[1] for v in votes]
+
+                # Exclusion criteria from DCell paper
+                if any(c < 4 for c in counts) or any(c > n * 0.5 for c in counts):
+                    continue
+
+                # Majority-vote truth table
+                tt = tuple(1 if v[1] >= v[0] else 0 for v in votes)
+                fn_name = tt_to_name.get(tt)
+                if fn_name is None:
+                    continue
+
+                correct = sum(
+                    1 for i in range(n)
+                    if parent_bin[i] == tt[int(c1_bin[i]) * 2 + int(c2_bin[i])]
+                )
+                results.append({
+                    'parent': term,
+                    'child1': c1,
+                    'child2': c2,
+                    'logic': fn_name,
+                    'consistency': round(correct / n, 4),
+                    'n_samples': n,
+                })
+
+        if not results:
+            return pd.DataFrame(
+                columns=['parent', 'child1', 'child2', 'logic', 'consistency', 'n_samples']
+            )
+
+        return (
+            pd.DataFrame(results)
+            .sort_values('consistency', ascending=False)
+            .reset_index(drop=True)
+        )
+
     def calc_scores(self):
         """Calculate all RLIPP and gene scores."""
         print("\nCalculating RLIPP scores ...")
@@ -244,14 +410,51 @@ class ClinicalRLIPPCalculator:
         gene_path = self.outdir / 'gene_scores.txt'
         gene_df.to_csv(gene_path, sep='\t', index=False)
         print(f"Gene scores:  {len(gene_df)} genes → {gene_path}")
+
+        # Gene weights within subsystems (PC1 correlation)
+        print("Calculating subsystem gene weights ...")
+        subsys_gene_df = self.calc_subsystem_gene_weights(feature_map)
+
+        subsys_gene_path = self.outdir / 'subsystem_gene_weights.txt'
+        subsys_gene_df.to_csv(subsys_gene_path, sep='\t', index=False, float_format='%.4f')
+        print(f"Subsystem gene weights: {len(subsys_gene_df)} term-gene pairs → {subsys_gene_path}")
+
+        # Top-systems summary: top 20 terms × top 5 driving genes
+        if not subsys_gene_df.empty and not rlipp_df.empty:
+            top_terms = rlipp_df.head(20)['term'].tolist()
+            top_genes = (
+                subsys_gene_df[
+                    subsys_gene_df['term'].isin(top_terms) & (subsys_gene_df['rank'] <= 5)
+                ]
+                .merge(rlipp_df[['term', 'rlipp']], on='term', how='left')
+                .sort_values(['rlipp', 'rank'], ascending=[False, True])
+            )
+            top_genes[['term', 'rlipp', 'gene', 'pc1_corr', 'pc1_corr_pval', 'rank']].to_csv(
+                self.outdir / 'top_subsystem_genes.txt', sep='\t', index=False, float_format='%.4f'
+            )
+            print(f"Top subsystem genes → {self.outdir / 'top_subsystem_genes.txt'}")
+
+        # Boolean logic characterization of subsystem trios
+        print("Calculating Boolean logic characterization ...")
+        bool_logic_df = self.calc_boolean_logic(feature_map)
+
+        bool_logic_path = self.outdir / 'boolean_logic.txt'
+        bool_logic_df.to_csv(bool_logic_path, sep='\t', index=False, float_format='%.4f')
+        print(f"Boolean logic: {len(bool_logic_df)} trios matched → {bool_logic_path}")
+
+        if not bool_logic_df.empty:
+            summary = bool_logic_df['logic'].value_counts()
+            print("  Logic function counts: " + ", ".join(f"{k}={v}" for k, v in summary.items()))
+
         print(f"Scores computed in {time.time() - start:.1f}s")
 
-        return rlipp_df, gene_df
+        return rlipp_df, gene_df, subsys_gene_df, bool_logic_df
 
 
 # ── Hierarchy Builder ────────────────────────────────────────────────────────
 
-def build_annotated_hierarchy(ontology_path, rlipp_df, gene_df, outdir):
+def build_annotated_hierarchy(ontology_path, rlipp_df, gene_df, outdir,
+                              subsys_gene_df=None, bool_logic_df=None):
     """
     Build an annotated hierarchy graph from the ontology + RLIPP scores.
     Exports GraphML and interactive HTML.
@@ -319,7 +522,8 @@ def build_annotated_hierarchy(ontology_path, rlipp_df, gene_df, outdir):
 
     # Build interactive HTML visualization
     html_path = outdir / 'hierarchy_viz.html'
-    build_html_viz(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, gene_df, html_path)
+    build_html_viz(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, gene_df, html_path,
+                   subsys_gene_df=subsys_gene_df, bool_logic_df=bool_logic_df)
     print(f"HTML viz:     {html_path}")
 
     # Summary table
@@ -441,7 +645,8 @@ def build_cx2_hierarchy(ontology, terms, genes, rlipp_scores, rlipp_df, gene_sco
     print(f"CX2:          {cx2_path} ({n_nodes} nodes, {n_edges} edges)")
 
 
-def build_html_viz(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, gene_df, outpath):
+def build_html_viz(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, gene_df, outpath,
+                   subsys_gene_df=None, bool_logic_df=None):
     """Build a standalone interactive HTML visualization of the annotated hierarchy."""
     import math
 
@@ -515,6 +720,42 @@ def build_html_viz(ontology, terms, genes, rlipp_scores, rlipp_df, gene_scores, 
             {'id': g, 'rho': sf(gene_scores.get(g, 0.0)), 'p_val': sf(gene_pvals.get(g, 1.0), 1.0)}
             for g in inherited
         ]
+
+    # Build driving_genes lookup: term -> top-10 genes by |pc1_corr|
+    driving_genes_map = {}
+    if subsys_gene_df is not None and not subsys_gene_df.empty:
+        gene_pvals_lookup = dict(zip(gene_df['gene'], gene_df['p_val'])) if 'p_val' in gene_df.columns else {}
+        for term, grp in subsys_gene_df.groupby('term'):
+            top = grp[grp['rank'] <= 10].copy()
+            driving_genes_map[term] = [
+                {
+                    'id': row['gene'],
+                    'pc1_corr': sf(row['pc1_corr']),
+                    'pc1_corr_pval': sf(row['pc1_corr_pval'], 1.0),
+                    'rho': sf(gene_scores.get(row['gene'], 0.0)),
+                    'rho_pval': sf(gene_pvals_lookup.get(row['gene'], 1.0), 1.0),
+                }
+                for _, row in top.iterrows()
+            ]
+
+    for node in nodes:
+        node['driving_genes'] = driving_genes_map.get(node['id'], [])
+
+    # Build boolean logic lookup: parent_term -> [{child1, child2, logic, consistency}]
+    bool_logic_map = {}
+    if bool_logic_df is not None and not bool_logic_df.empty:
+        for _, row in bool_logic_df.iterrows():
+            entry = {
+                'child1': row['child1'],
+                'child2': row['child2'],
+                'logic': row['logic'],
+                'consistency': sf(row['consistency']),
+                'n_samples': int(row['n_samples']),
+            }
+            bool_logic_map.setdefault(row['parent'], []).append(entry)
+
+    for node in nodes:
+        node['bool_logic'] = bool_logic_map.get(node['id'], [])
 
     # Only include term-to-term edges; gene data lives in node attributes above.
     edges = []
@@ -700,6 +941,41 @@ function showDetail(termId) {{
         html += `</div>`;
     }}
 
+    if (node.driving_genes && node.driving_genes.length > 0) {{
+        html += `<div class="children" style="margin-top:14px"><strong>Key driving genes (${{node.driving_genes.length}}):</strong>`;
+        html += ` <span style="color:#666;font-size:11px">ranked by |correlation with PC1 of system hidden embedding|</span><br>`;
+        node.driving_genes.forEach((g, i) => {{
+            const corrSign = g.pc1_corr >= 0 ? '+' : '';
+            const rhoSign  = g.rho >= 0 ? '+' : '';
+            const borderColor = g.pc1_corr >= 0 ? '#e08030' : '#50a870';
+            const tip = `pc1_corr=${{corrSign}}${{g.pc1_corr.toFixed(3)}} (p=${{g.pc1_corr_pval.toExponential(1)}}), cohort ρ=${{rhoSign}}${{g.rho.toFixed(3)}}`;
+            html += `<span class="child gene" style="border-left:3px solid ${{borderColor}}" title="${{tip}}">`;
+            html += `#${{i+1}} ${{g.id}} <span style="color:#888;font-size:10px">${{corrSign}}${{g.pc1_corr.toFixed(3)}}</span></span>`;
+        }});
+        html += `</div>`;
+    }}
+
+    if (node.bool_logic && node.bool_logic.length > 0) {{
+        const logicIcons = {{
+            'AND':'A∧B', 'OR':'A∨B', 'XOR':'A⊕B', 'NOR':'¬(A∨B)', 'NAND':'¬(A∧B)',
+            'XNOR':'A↔B', 'A_NOT_B':'A∧¬B', 'B_NOT_A':'B∧¬A',
+            'A_OR_NOT_B':'A∨¬B', 'B_OR_NOT_A':'B∨¬A',
+        }};
+        html += `<div class="children" style="margin-top:14px"><strong>Boolean logic relationships (${{node.bool_logic.length}}):</strong>`;
+        html += ` <span style="color:#666;font-size:11px">parent state ≈ f(child1, child2) binarized at median PC1</span><br>`;
+        node.bool_logic.forEach(bl => {{
+            const icon = logicIcons[bl.logic] || bl.logic;
+            const pct  = Math.round(bl.consistency * 100);
+            const col  = bl.consistency >= 0.7 ? '#f5a623' : bl.consistency >= 0.6 ? '#7eb8da' : '#888';
+            html += `<span class="child" style="border-left:3px solid ${{col}}" `;
+            html += `title="child1=${{bl.child1}}, child2=${{bl.child2}}, n=${{bl.n_samples}}">`;
+            html += `<span style="color:${{col}};font-weight:bold">${{icon}}</span> `;
+            html += `<span style="color:#888;font-size:10px">[A=${{bl.child1}}, B=${{bl.child2}}]</span> `;
+            html += `<span style="color:#aaa;font-size:10px">consistency=${{pct}}%</span></span>`;
+        }});
+        html += `</div>`;
+    }}
+
     if (directGenes.length > 0) {{
         html += `<div class="children" style="margin-top:12px"><strong>Term-specific genes (${{directGenes.length}}):</strong> <span style="color:#666;font-size:11px">unique to this system, not in any child</span><br>`;
         directGenes.forEach(g => {{
@@ -851,6 +1127,20 @@ class PatientScoreCalculator:
             print("  No .hidden files found — skipping patient scoring.")
             print("  (Re-run predict.py to generate hidden embedding files.)")
             return None
+
+        # Resolve any mismatch between cell_ids length and actual hidden-file rows.
+        # h[:n_samples] above handles hidden files that are LONGER than cell_ids;
+        # this block handles the reverse (hidden files SHORTER than cell_ids).
+        actual_rows = min((h.shape[0] for h in term_hiddens.values()), default=n_samples)
+        if gene_hiddens:
+            actual_rows = min(actual_rows, min(h.shape[0] for h in gene_hiddens.values()))
+        if actual_rows < n_samples:
+            print(f"  Note: hidden files have {actual_rows} rows vs {n_samples} cell_ids — "
+                  f"truncating to {actual_rows}")
+            n_samples   = actual_rows
+            cell_ids    = cell_ids[:n_samples]
+            term_hiddens = {t: h[:n_samples] for t, h in term_hiddens.items()}
+            gene_hiddens = {g: h[:n_samples] for g, h in gene_hiddens.items()}
 
         # Term importance: L2 norm of z-scored embedding per patient.
         # Z-scoring is required because BatchNorm makes raw norms nearly identical
@@ -1315,14 +1605,16 @@ def main():
     print(f"Run dir:    {run_dir}")
     print(f"Annotation: {annotation_dir}\n")
 
-    # Compute RLIPP and gene scores
+    # Compute RLIPP, gene scores, subsystem gene weights, and boolean logic
     calculator = ClinicalRLIPPCalculator(args)
-    rlipp_df, gene_df = calculator.calc_scores()
+    rlipp_df, gene_df, subsys_gene_df, bool_logic_df = calculator.calc_scores()
 
     # Build annotated hierarchy
     print("\nBuilding annotated hierarchy ...")
     outdir = Path(args.outdir)
-    G = build_annotated_hierarchy(args.ontology, rlipp_df, gene_df, outdir)
+    G = build_annotated_hierarchy(args.ontology, rlipp_df, gene_df, outdir,
+                                  subsys_gene_df=subsys_gene_df,
+                                  bool_logic_df=bool_logic_df)
 
     # Detect cBioPortal study for patient page links
     meta_path = input_dir / "metadata.json"
@@ -1355,6 +1647,9 @@ def main():
 Output files:
   rlipp_scores.txt            — RLIPP scores for all ontology terms (cross-cohort)
   gene_scores.txt             — Gene-level Spearman correlations (cross-cohort)
+  subsystem_gene_weights.txt  — Per-term gene rankings by PC1 correlation (all terms)
+  top_subsystem_genes.txt     — Top 20 terms × top 5 driving genes (quick-read summary)
+  boolean_logic.txt           — Boolean logic characterization of subsystem trios (AND/OR/XOR/etc.)
   hierarchy_annotated.graphml — Annotated hierarchy (open in Cytoscape)
   hierarchy_annotated.cx2     — Annotated hierarchy in CX2 format (NDEx/Cytoscape Web)
   hierarchy_viz.html          — Interactive HTML visualization (open in browser)
@@ -1373,6 +1668,7 @@ The RLIPP score measures relative local improvement in predictive power:
 
     annotation_files = [
         "rlipp_scores.txt", "gene_scores.txt",
+        "subsystem_gene_weights.txt", "top_subsystem_genes.txt", "boolean_logic.txt",
         "hierarchy_annotated.graphml", "hierarchy_viz.html",
         "top_systems.txt", "hierarchy_annotated.cx2",
         "patient_term_importance.txt", "patient_rlipp.txt",
