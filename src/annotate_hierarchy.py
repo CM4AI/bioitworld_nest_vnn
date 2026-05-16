@@ -650,6 +650,103 @@ def build_cx2_hierarchy(ontology, terms, genes, rlipp_scores, rlipp_df, gene_sco
             net.add_edge(source=name_to_id[parent], target=name_to_id[child],
                          attributes={'interaction': row['relation']})
 
+    # Visual style: terms colored by RLIPP (grey→yellow→orange), genes as small diamonds,
+    # gene edges dashed. RLIPP gradient is anchored at 1.0 (neutral) so terms that add
+    # information above their children stand out in warm colors.
+    max_rlipp = max((v for v in rlipp_scores.values() if v == v), default=2.0)
+    max_rlipp = max(max_rlipp, 2.0)
+    net.set_visual_properties({
+        "default": {
+            "network": {"NETWORK_BACKGROUND_COLOR": "#FFFFFF"},
+            "node": {
+                "NODE_FILL_COLOR": "#CCCCCC",
+                "NODE_SHAPE": "ELLIPSE",
+                "NODE_SIZE": 50.0,
+                "NODE_LABEL_FONT_SIZE": 10,
+                "NODE_BORDER_COLOR": "#555555",
+                "NODE_BORDER_WIDTH": 1.5,
+            },
+            "edge": {
+                "EDGE_LINE_TYPE": "SOLID",
+                "EDGE_WIDTH": 1.0,
+                "EDGE_STROKE_UNSELECTED_PAINT": "#888888",
+            },
+        },
+        "nodeMapping": {
+            "NODE_LABEL": {
+                "type": "PASSTHROUGH",
+                "definition": {"attribute": "name"},
+            },
+            "NODE_SHAPE": {
+                "type": "DISCRETE",
+                "definition": {
+                    "attribute": "type",
+                    "map": [
+                        {"v": "term", "vp": "ELLIPSE"},
+                        {"v": "gene", "vp": "DIAMOND"},
+                    ],
+                },
+            },
+            "NODE_SIZE": {
+                "type": "DISCRETE",
+                "definition": {
+                    "attribute": "type",
+                    "map": [
+                        {"v": "term", "vp": 50.0},
+                        {"v": "gene", "vp": 18.0},
+                    ],
+                },
+            },
+            # Gradient: RLIPP=0 (gene nodes) → grey; 1.0 (neutral) → light yellow; max → dark orange
+            "NODE_FILL_COLOR": {
+                "type": "CONTINUOUS",
+                "definition": {
+                    "attribute": "RLIPP",
+                    "map": [
+                        {"includeMin": True, "includeMax": False,
+                         "min": 0.0, "max": 1.0,
+                         "minVP": "#CCCCCC", "maxVP": "#FFFFD4"},
+                        {"includeMin": True, "includeMax": True,
+                         "min": 1.0, "max": max_rlipp,
+                         "minVP": "#FFFFD4", "maxVP": "#D94801"},
+                    ],
+                },
+            },
+            "NODE_BORDER_WIDTH": {
+                "type": "DISCRETE",
+                "definition": {
+                    "attribute": "type",
+                    "map": [
+                        {"v": "term", "vp": 1.5},
+                        {"v": "gene", "vp": 0.5},
+                    ],
+                },
+            },
+        },
+        "edgeMapping": {
+            "EDGE_LINE_TYPE": {
+                "type": "DISCRETE",
+                "definition": {
+                    "attribute": "interaction",
+                    "map": [
+                        {"v": "default", "vp": "SOLID"},
+                        {"v": "gene",    "vp": "LONG_DASH"},
+                    ],
+                },
+            },
+            "EDGE_STROKE_UNSELECTED_PAINT": {
+                "type": "DISCRETE",
+                "definition": {
+                    "attribute": "interaction",
+                    "map": [
+                        {"v": "default", "vp": "#555555"},
+                        {"v": "gene",    "vp": "#AAAAAA"},
+                    ],
+                },
+            },
+        },
+    })
+
     # Write CX2 file
     cx2_path = outdir / 'hierarchy_annotated.cx2'
     net.write_as_raw_cx2(str(cx2_path))
